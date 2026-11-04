@@ -1,11 +1,21 @@
 {
   "name": "vscode-volume-viewer",
   "displayName": "Volume Viewer (remote-safe)",
-  "description": "View 3D/4D image volumes (currently .nii / .nii.gz) in a VS Code tab. Reads files on the remote host and sends bytes to the viewer, avoiding remote resource URLs.",
+  "description": "View 3D medical image volumes (.nii / .nii.gz) with label overlays in a VS Code tab. Works over Remote-SSH.",
   "version": "0.1.0",
-  "publisher": "ads4015",
-  "license": "UNLICENSED",
-  "private": true,
+  "publisher": "AdiSchein",
+  "author": "Adina Scheinfeld",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AdinaScheinfeld/vscode-volume-viewer.git"
+  },
+  "homepage": "https://github.com/AdinaScheinfeld/vscode-volume-viewer#readme",
+  "bugs": {
+    "url": "https://github.com/AdinaScheinfeld/vscode-volume-viewer/issues"
+  },
+  "keywords": ["nifti", "nii", "medical imaging", "mri", "ct", "segmentation", "niivue", "remote-ssh"],
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -28,7 +38,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "package": "vsce package --no-dependencies --allow-missing-repository --skip-license -o vscode-volume-viewer.vsix"
+    "package": "vsce package --no-dependencies -o vscode-volume-viewer.vsix"
   },
   "devDependencies": {
     "@niivue/niivue": "0.68.1",

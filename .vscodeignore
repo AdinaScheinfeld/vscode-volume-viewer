@@ -9,3 +9,5 @@ tsconfig.json
 docs/**
 DEV_NOTES.md
 .gitignore
+scripts/**
+licenses/**

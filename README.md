@@ -3,7 +3,7 @@
 View 3D medical images right inside VS Code: no downloading, no switching apps.
 Works on your own computer and on remote servers over Remote-SSH.
 
-![Volume Viewer showing an image with a label overlay](docs/screenshot.png)
+![Volume Viewer showing an image with a label overlay](https://raw.githubusercontent.com/AdinaScheinfeld/vscode-volume-viewer/main/docs/screenshot.png)
 
 ## What you can do
 
@@ -15,9 +15,9 @@ Works on your own computer and on remote servers over Remote-SSH.
 
 ## Install
 
-1. Get the `vscode-volume-viewer.vsix` file.
-2. In VS Code, right-click it and choose **Install Extension VSIX**.
-3. Reload the window when asked.
+In VS Code, open the **Extensions** panel, search for **Volume Viewer (remote-safe)**, and click **Install**.
+
+If you use Remote-SSH, install it while connected so it runs on the server.
 
 ## Use
 
@@ -43,3 +43,8 @@ This creates `vscode-volume-viewer.vsix`.
 ## Credits
 
 Images are drawn with [NiiVue](https://github.com/niivue/niivue).
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for its license and others.
+
+## License
+
+[MIT](LICENSE)

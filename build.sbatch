@@ -27,6 +27,9 @@ npm install --no-audit --no-fund
 echo "== niivue API check"
 grep -rn "loadFromArrayBuffer" node_modules/@niivue/niivue --include=*.d.ts | head -5 || echo "loadFromArrayBuffer not found in d.ts"
 
+echo "== icon"
+/midtier/paetzollab/scratch/ads4015/conda/envs/monai-env1/bin/python scripts/make_icon.py docs/screenshot.png media/icon.png
+
 echo "== typecheck"
 npx tsc -p tsconfig.json
 
