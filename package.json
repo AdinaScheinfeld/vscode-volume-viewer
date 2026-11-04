@@ -1,0 +1,41 @@
+{
+  "name": "vscode-volume-viewer",
+  "displayName": "Volume Viewer (remote-safe)",
+  "description": "View 3D/4D image volumes (currently .nii / .nii.gz) in a VS Code tab. Reads files on the remote host and sends bytes to the viewer, avoiding remote resource URLs.",
+  "version": "0.1.0",
+  "publisher": "ads4015",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Visualization"],
+  "extensionKind": ["workspace"],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "volumeViewer.viewer",
+        "displayName": "Volume Viewer (remote-safe)",
+        "selector": [
+          { "filenamePattern": "*.nii" },
+          { "filenamePattern": "*.nii.gz" }
+        ],
+        "priority": "default"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "package": "vsce package --no-dependencies --allow-missing-repository --skip-license -o vscode-volume-viewer.vsix"
+  },
+  "devDependencies": {
+    "@niivue/niivue": "0.68.1",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "1.80.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,11 @@
+src/**
+node_modules/**
+logs/**
+build.mjs
+build.sbatch
+tsconfig.json
+*.vsix
+.tools/**
+docs/**
+DEV_NOTES.md
+.gitignore

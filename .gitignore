@@ -1,0 +1,6 @@
+node_modules/
+.tools/
+dist/
+logs/
+*.vsix
+DEV_NOTES.md
