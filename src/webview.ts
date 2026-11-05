@@ -1,17 +1,21 @@
-// Webview side. Receives file bytes via postMessage and renders with niivue.
-// No URL loading at all.
+// Webview side. Receives file bytes via postMessage (no URL loading at all) and shows them:
+// - NIfTI volumes with niivue (views, overlays, contrast)
+// - 2D / cine DICOM with the clip player in cine.ts
 
-import { Niivue, NVImage } from '@niivue/niivue';
+import { Niivue, NVImage, DRAG_MODE, MULTIPLANAR_TYPE } from '@niivue/niivue';
+import { CinePlayer, isDicom } from './cine';
+import { readHeader, groupSeries, seriesLabel, dicomToNifti } from './dcm';
 
 declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
 const vscode = acquireVsCodeApi();
 
-const statusEl = document.getElementById('status') as HTMLSpanElement;
-const errEl = document.getElementById('err') as HTMLDivElement;
-const viewSel = document.getElementById('view') as HTMLSelectElement;
-const addBtn = document.getElementById('addOverlay') as HTMLButtonElement;
-const overlaysEl = document.getElementById('overlays') as HTMLDivElement;
-const canvas = document.getElementById('gl') as HTMLCanvasElement;
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+const statusEl = $<HTMLSpanElement>('status');
+const errEl = $<HTMLDivElement>('err');
+const viewSel = $<HTMLSelectElement>('view');
+const addBtn = $<HTMLButtonElement>('addOverlay');
+const overlaysEl = $<HTMLDivElement>('overlays');
+const canvas = $<HTMLCanvasElement>('gl');
 
 const LABELS = '__labels__';
 const OVERLAY_CMAPS = ['red', 'green', 'blue', 'warm', 'cool', 'hot', 'winter', 'plasma', 'viridis', 'gray'];
@@ -25,10 +29,15 @@ function showError(msg: string) {
   vscode.postMessage({ type: 'log', message: msg });
 }
 
+const log = (message: string) => vscode.postMessage({ type: 'log', message });
+
 const nv = new Niivue({
   backColor: [0, 0, 0, 1],
   show3Dcrosshair: true,
   isResizeCanvas: true,
+  // Always a 2x2 grid (axial, coronal, sagittal, 3D), never a tall column.
+  multiplanarLayout: MULTIPLANAR_TYPE.GRID,
+  dragMode: DRAG_MODE.contrast,
 });
 
 let baseStatus = '';
@@ -46,9 +55,62 @@ function applyView(v: string) {
 viewSel.addEventListener('change', () => applyView(viewSel.value));
 addBtn.addEventListener('click', () => vscode.postMessage({ type: 'pickOverlay' }));
 
+// ---------- contrast (main image) ----------
+
+const cMin = $<HTMLInputElement>('cMin');
+const cMax = $<HTMLInputElement>('cMax');
+const cMinN = $<HTMLInputElement>('cMinN');
+const cMaxN = $<HTMLInputElement>('cMaxN');
+let baseVol: NVImage | null = null;
+
+function fmt(v: number) {
+  return Math.abs(v) >= 1000 || Number.isInteger(v) ? String(Math.round(v)) : v.toPrecision(4);
+}
+
+function syncContrastUi() {
+  if (!baseVol) return;
+  cMin.value = cMinN.value = fmt(baseVol.cal_min ?? 0);
+  cMax.value = cMaxN.value = fmt(baseVol.cal_max ?? 1);
+}
+
+function setContrast(lo: number, hi: number) {
+  if (!baseVol) return;
+  if (hi <= lo) hi = lo + Math.max(Number(cMin.step) || 1e-6, 1e-6);
+  baseVol.cal_min = lo;
+  baseVol.cal_max = hi;
+  nv.updateGLVolume();
+  syncContrastUi();
+}
+
+function setupContrast(vol: NVImage) {
+  baseVol = vol;
+  const v = vol as any;
+  const gmin: number = v.global_min ?? vol.cal_min;
+  const gmax: number = v.global_max ?? vol.cal_max;
+  const isInt = INT_TYPES.has(vol.hdr?.datatypeCode ?? -1);
+  const step = isInt && gmax - gmin > 50 ? 1 : (gmax - gmin) / 1000 || 1e-6;
+  for (const el of [cMin, cMax, cMinN, cMaxN]) { el.min = String(gmin); el.max = String(gmax); el.step = String(step); }
+  syncContrastUi();
+  $('contrast').classList.remove('hidden');
+}
+
+cMin.addEventListener('input', () => setContrast(Number(cMin.value), Math.max(Number(cMax.value), Number(cMin.value))));
+cMax.addEventListener('input', () => setContrast(Math.min(Number(cMin.value), Number(cMax.value)), Number(cMax.value)));
+cMinN.addEventListener('change', () => setContrast(Number(cMinN.value), Number(cMaxN.value)));
+cMaxN.addEventListener('change', () => setContrast(Number(cMinN.value), Number(cMaxN.value)));
+$('cAuto').addEventListener('click', () => {
+  const v = baseVol as any;
+  if (v) setContrast(v.robust_min ?? v.global_min, v.robust_max ?? v.global_max);
+});
+$('cFull').addEventListener('click', () => {
+  const v = baseVol as any;
+  if (v) setContrast(v.global_min, v.global_max);
+});
+nv.onIntensityChange = (vol: NVImage) => { if (vol === baseVol) syncContrastUi(); };
+
 // ---------- overlays ----------
 
-// Distinct colours per integer label (golden-angle hue spacing), label 0 transparent.
+// Distinct colors per integer label (golden-angle hue spacing), label 0 transparent.
 function labelColormap(maxLabel: number) {
   const n = Math.max(1, Math.min(Math.round(maxLabel), 65535));
   const R: number[] = [], G: number[] = [], B: number[] = [], A: number[] = [], I: number[] = [];
@@ -62,10 +124,6 @@ function labelColormap(maxLabel: number) {
     A.push(255); I.push(i);
   }
   return { R, G, B, A, I };
-}
-
-function volIndex(vol: NVImage) {
-  return nv.volumes.indexOf(vol);
 }
 
 function setOverlayColormap(vol: NVImage, cm: string) {
@@ -102,7 +160,7 @@ function addOverlayRow(vol: NVImage, name: string, initialCmap: string, initialO
 
   const cmSel = document.createElement('select');
   const optLabels = document.createElement('option');
-  optLabels.value = LABELS; optLabels.textContent = 'labels (distinct colours)';
+  optLabels.value = LABELS; optLabels.textContent = 'labels (distinct colors)';
   cmSel.append(optLabels);
   const available = new Set(nv.colormaps());
   for (const cm of OVERLAY_CMAPS) {
@@ -117,7 +175,7 @@ function addOverlayRow(vol: NVImage, name: string, initialCmap: string, initialO
   rm.textContent = 'remove';
 
   const applyOpacity = () => {
-    const i = volIndex(vol);
+    const i = nv.volumes.indexOf(vol);
     if (i >= 0) nv.setOpacity(i, vis.checked ? parseFloat(op.value) : 0);
   };
   vis.addEventListener('change', applyOpacity);
@@ -142,39 +200,203 @@ async function addOverlay(name: string, buf: ArrayBuffer) {
   addOverlayRow(vol, name, cmap, 0.5);
 }
 
-// ---------- messages ----------
+// ---------- loading ----------
+
+function setMode(mode: 'volume' | 'cine') {
+  const vol = mode === 'volume';
+  $('volCtl').classList.toggle('hidden', !vol);
+  canvas.classList.toggle('hidden', !vol);
+  $('contrast').classList.toggle('hidden', !vol || !baseVol);
+  overlaysEl.classList.toggle('hidden', !vol);
+  $('cineCtl').classList.toggle('hidden', vol);
+  $('cineAdj').classList.toggle('hidden', vol);
+  $('cine').classList.toggle('hidden', vol);
+}
+
+function clearVolumes() {
+  while (nv.volumes.length) nv.removeVolume(nv.volumes[0]);
+  overlaysEl.innerHTML = '';
+  baseVol = null;
+}
+
+// `label` is what the status line shows; `fileName` must carry the right extension for niivue.
+async function openVolume(label: string, fileName: string, buf: ArrayBuffer, readInfo: string) {
+  setMode('volume');
+  clearVolumes();
+  const t0 = performance.now();
+  const mb = (buf.byteLength / 1e6).toFixed(1);
+  statusEl.textContent = `Decoding ${label} (${mb} MB)…`;
+  await nv.loadFromArrayBuffer(buf, fileName);
+  applyView(viewSel.value);
+  const ms = Math.round(performance.now() - t0);
+  const vol = nv.volumes[0];
+  const dims = vol?.hdr?.dims ? vol.hdr.dims.slice(1, 1 + vol.hdr.dims[0]).join('×') : '?';
+  baseStatus = `${label} · ${dims} · ${readInfo}, render ${ms} ms`;
+  statusEl.textContent = baseStatus;
+  addBtn.disabled = false;
+  if (vol) setupContrast(vol);
+}
+
+let player: CinePlayer | null = null;
+
+async function openCine(name: string, buf: ArrayBuffer, readInfo: string) {
+  setMode('cine');
+  baseStatus = '';
+  player?.destroy();
+  const mb = (buf.byteLength / 1e6).toFixed(1);
+  statusEl.textContent = `Decoding ${name} (${mb} MB)…`;
+  player = new CinePlayer({
+    canvas: $('cine'),
+    play: $('play'), frame: $('frame'), frameLbl: $('frameLbl'), fps: $('fps'),
+    bri: $('bri'), briLbl: $('briLbl'), con: $('con'), conLbl: $('conLbl'),
+    auto: $('cineAuto'), reset: $('cineReset'),
+  });
+  const info = await player.open(buf);
+  statusEl.textContent =
+    `${name} · ${info.cols}×${info.rows} · ${info.nFrames} frame${info.nFrames > 1 ? 's' : ''} · ${info.codec} · ${mb} MB · ${readInfo}, first frame ${info.firstFrameMs} ms`;
+  log(`cine ${name}: ${info.cols}x${info.rows}x${info.nFrames} ${info.codec} @${info.fps}fps, first frame ${info.firstFrameMs} ms`);
+}
+
+// ---------- DICOM 3D: conversion, sibling files, folders ----------
+
+type DicomFile = { name: string; buf: ArrayBuffer };
+interface FileEntry { name: string; size: number }
+
+let siblingsWaiter: ((f: FileEntry[]) => void) | null = null;
+const fileRequests = new Map<number, { items: DicomFile[]; resolve: (f: DicomFile[]) => void; reject: (e: Error) => void; total: number }>();
+let nextReq = 1;
+
+function listSiblings(): Promise<FileEntry[]> {
+  return new Promise((resolve) => {
+    siblingsWaiter = resolve;
+    vscode.postMessage({ type: 'listSiblings' });
+  });
+}
+
+function readFiles(names: string[]): Promise<DicomFile[]> {
+  if (!names.length) return Promise.resolve([]);
+  const reqId = nextReq++;
+  return new Promise((resolve, reject) => {
+    fileRequests.set(reqId, { items: [], resolve, reject, total: names.length });
+    vscode.postMessage({ type: 'readFiles', names, reqId });
+  });
+}
+
+const mbOf = (n: number) => (n / 1e6).toFixed(1);
+
+async function open3D(label: string, files: DicomFile[], readMs: number) {
+  setMode('volume');
+  statusEl.textContent = `Converting ${files.length} DICOM file${files.length > 1 ? 's' : ''} to a 3D volume…`;
+  const t0 = performance.now();
+  const nii = await dicomToNifti(files, log);
+  const convMs = Math.round(performance.now() - t0);
+  const bytes = files.reduce((a, f) => a + f.buf.byteLength, 0);
+  const extra = nii.outputs.length > 1 ? ` · showing ${nii.name} (of ${nii.outputs.length} outputs)` : '';
+  await openVolume(`${label}${extra}`, nii.name, nii.buf,
+    `${files.length} file${files.length > 1 ? 's' : ''} · ${mbOf(bytes)} MB · read ${readMs} ms, convert ${convMs} ms`);
+}
+
+// A single .dcm file was opened.
+async function openDicomFile(name: string, buf: ArrayBuffer, readMs: number) {
+  const h = readHeader(name, buf);
+  if (!h || h.is2D) return openCine(name, buf, `read ${readMs} ms`);
+  if (h.nFrames > 1) return open3D(`${name} · ${h.modality}`, [{ name, buf }], readMs);
+
+  // One slice of a series: gather the other files in the same folder from the same series.
+  const t0 = performance.now();
+  statusEl.textContent = 'Listing the other files in this folder…';
+  const siblings = (await listSiblings()).filter((f) => f.name !== name);
+  const total = siblings.reduce((a, f) => a + f.size, 0);
+  statusEl.textContent = `Reading ${siblings.length} files from this folder (${mbOf(total)} MB)…`;
+  const others = await readFiles(siblings.map((f) => f.name));
+  const series = groupSeries([{ name, buf }, ...others]).find((s) => s.uid === h.seriesUid);
+  const files = series?.files ?? [{ name, buf }];
+  await open3D(`${h.seriesDesc} · ${h.modality}`, files, readMs + Math.round(performance.now() - t0));
+}
+
+// A folder was opened: read it, group into series, let the user pick.
+async function openDicomFolder(folderName: string, entries: FileEntry[], listMs: number) {
+  if (!entries.length) throw new Error(`No files found in ${folderName}.`);
+  const total = entries.reduce((a, f) => a + f.size, 0);
+  if (total > 2e9) throw new Error(`${folderName} has ${mbOf(total)} MB of files; the limit is 2000 MB. Open a smaller folder or a single file.`);
+  const t0 = performance.now();
+  statusEl.textContent = `Reading ${entries.length} files from ${folderName} (${mbOf(total)} MB)…`;
+  const files = await readFiles(entries.map((f) => f.name));
+  const readMs = listMs + Math.round(performance.now() - t0);
+  const series = groupSeries(files);
+  if (!series.length) throw new Error(`No DICOM files found in ${folderName}.`);
+
+  // 3D series are one choice each; 2D series list each file (e.g. each ultrasound clip).
+  type Choice = { label: string; open: () => Promise<void> };
+  const choices: Choice[] = [];
+  for (const s of series) {
+    if (s.is2D) {
+      for (const f of s.files) {
+        choices.push({ label: `${seriesLabel(s)} · ${f.name}`, open: () => openCine(f.name, f.buf, `read ${readMs} ms`) });
+      }
+    } else {
+      choices.push({ label: seriesLabel(s), open: () => open3D(`${s.desc} · ${s.modality}`, s.files, readMs) });
+    }
+  }
+  const sel = $<HTMLSelectElement>('series');
+  sel.innerHTML = '';
+  choices.forEach((c, i) => {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = c.label;
+    sel.append(o);
+  });
+  $('seriesCtl').classList.toggle('hidden', choices.length < 2);
+  sel.onchange = () => {
+    errEl.style.display = 'none';
+    choices[Number(sel.value)].open().catch((e) => showError(`Failed to open series: ${e?.message ?? e}`));
+  };
+  log(`folder ${folderName}: ${files.length} files, ${series.length} series, ${choices.length} choices`);
+  await choices[0].open();
+}
 
 window.addEventListener('message', async (event) => {
   const msg = event.data;
   if (msg?.type === 'error') {
+    for (const r of fileRequests.values()) r.reject(new Error(msg.message));
+    fileRequests.clear();
     showError(msg.message);
+    return;
+  }
+  if (msg?.type === 'siblings') {
+    siblingsWaiter?.(msg.files ?? []);
+    siblingsWaiter = null;
+    return;
+  }
+  if (msg?.type === 'files') {
+    const r = fileRequests.get(msg.reqId);
+    if (!r) return;
+    for (const it of msg.items ?? []) r.items.push({ name: it.name, buf: toArrayBuffer(it.data) });
+    statusEl.textContent = `Reading files… ${r.items.length} / ${r.total}`;
+    if (msg.last) {
+      fileRequests.delete(msg.reqId);
+      r.resolve(r.items);
+    }
     return;
   }
   if (msg?.type === 'overlay') {
     try {
       const t0 = performance.now();
       await addOverlay(msg.name, toArrayBuffer(msg.data));
-      vscode.postMessage({ type: 'log', message: `overlay ${msg.name}: read ${msg.readMs} ms, load ${Math.round(performance.now() - t0)} ms` });
+      log(`overlay ${msg.name}: read ${msg.readMs} ms, load ${Math.round(performance.now() - t0)} ms`);
     } catch (e: any) {
       showError(`Failed to load overlay ${msg.name}: ${e?.message ?? e}\n${e?.stack ?? ''}`);
     }
     return;
   }
-  if (msg?.type !== 'load') return;
   try {
-    const t0 = performance.now();
-    vscode.postMessage({ type: 'log', message: `received data type: ${describe(msg.data)}` });
-    const buf = toArrayBuffer(msg.data);
-    const mb = (buf.byteLength / 1e6).toFixed(1);
-    statusEl.textContent = `Decoding ${msg.name} (${mb} MB)…`;
-    await nv.loadFromArrayBuffer(buf, msg.name);
-    applyView(viewSel.value);
-    const ms = Math.round(performance.now() - t0);
-    const vol = nv.volumes[0];
-    const dims = vol?.hdr?.dims ? vol.hdr.dims.slice(1, 1 + vol.hdr.dims[0]).join('×') : '?';
-    baseStatus = `${msg.name} · ${dims} · ${mb} MB · read ${msg.readMs} ms, render ${ms} ms`;
-    statusEl.textContent = baseStatus;
-    addBtn.disabled = false;
+    if (msg?.type === 'folder') {
+      await openDicomFolder(msg.name, msg.files ?? [], msg.listMs ?? 0);
+    } else if (msg?.type === 'load') {
+      const buf = toArrayBuffer(msg.data);
+      if (isDicom(msg.name, buf)) await openDicomFile(msg.name, buf, msg.readMs);
+      else await openVolume(msg.name, msg.name, buf, `${mbOf(buf.byteLength)} MB · read ${msg.readMs} ms`);
+    }
   } catch (e: any) {
     showError(`Failed to load ${msg.name}: ${e?.message ?? e}\n${e?.stack ?? ''}`);
   }
@@ -183,12 +405,6 @@ window.addEventListener('message', async (event) => {
 nv.onLocationChange = (data: any) => {
   if (baseStatus && data?.string) statusEl.textContent = `${baseStatus} · ${data.string}`;
 };
-
-function describe(d: any): string {
-  const tag = Object.prototype.toString.call(d);
-  const len = d?.byteLength ?? d?.length ?? (d && typeof d === 'object' ? Object.keys(d).length : undefined);
-  return `${tag} len=${len}`;
-}
 
 // Accept whatever shape the bytes arrive in.
 function toArrayBuffer(d: any): ArrayBuffer {
@@ -202,12 +418,20 @@ function toArrayBuffer(d: any): ArrayBuffer {
     for (let i = 0; i < n; i++) u[i] = d[i];
     return u.buffer;
   }
-  throw new Error(`unexpected data: ${describe(d)}`);
+  throw new Error(`unexpected data: ${Object.prototype.toString.call(d)}`);
 }
 
 (async () => {
   try {
     await nv.attachToCanvas(canvas);
+    // niivue only listens for window resizes; also resize when the panel area changes
+    // (e.g. the toolbar wraps onto more lines or the editor is split).
+    let pending = false;
+    new ResizeObserver(() => {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => { pending = false; nv.resizeListener(); });
+    }).observe($("canvasWrap"));
     vscode.postMessage({ type: 'ready' });
   } catch (e: any) {
     showError(`WebGL init failed: ${e?.message ?? e}`);

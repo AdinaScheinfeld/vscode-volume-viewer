@@ -1,8 +1,8 @@
 {
   "name": "vscode-volume-viewer",
   "displayName": "Volume Viewer (remote-safe)",
-  "description": "View 3D medical image volumes (.nii / .nii.gz) with label overlays in a VS Code tab. Works over Remote-SSH.",
-  "version": "0.1.0",
+  "description": "View medical images in a VS Code tab: NIfTI volumes with label overlays and DICOM clips such as ultrasound. Works over Remote-SSH.",
+  "version": "0.3.1",
   "publisher": "AdiSchein",
   "author": "Adina Scheinfeld",
   "license": "MIT",
@@ -15,7 +15,7 @@
   "bugs": {
     "url": "https://github.com/AdinaScheinfeld/vscode-volume-viewer/issues"
   },
-  "keywords": ["nifti", "nii", "medical imaging", "mri", "ct", "segmentation", "niivue", "remote-ssh"],
+  "keywords": ["nifti", "nii", "dicom", "ultrasound", "medical imaging", "mri", "ct", "segmentation", "niivue", "remote-ssh"],
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -24,13 +24,30 @@
   "main": "./dist/extension.js",
   "activationEvents": [],
   "contributes": {
+    "commands": [
+      {
+        "command": "volumeViewer.openDicomFolder",
+        "title": "Open DICOM folder in Volume Viewer"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "volumeViewer.openDicomFolder",
+          "when": "explorerResourceIsFolder",
+          "group": "navigation@99"
+        }
+      ]
+    },
     "customEditors": [
       {
         "viewType": "volumeViewer.viewer",
         "displayName": "Volume Viewer (remote-safe)",
         "selector": [
           { "filenamePattern": "*.nii" },
-          { "filenamePattern": "*.nii.gz" }
+          { "filenamePattern": "*.nii.gz" },
+          { "filenamePattern": "*.dcm" },
+          { "filenamePattern": "*.dicom" }
         ],
         "priority": "default"
       }
@@ -44,6 +61,8 @@
     "@niivue/niivue": "0.68.1",
     "@types/node": "^20.0.0",
     "@types/vscode": "1.80.0",
+    "@niivue/dcm2niix": "1.4.20261029",
+    "dicom-parser": "1.8.21",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"
