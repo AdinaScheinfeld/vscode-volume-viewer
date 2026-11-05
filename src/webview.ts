@@ -5,6 +5,7 @@
 import { Niivue, NVImage, DRAG_MODE, MULTIPLANAR_TYPE } from '@niivue/niivue';
 import { CinePlayer, isDicom } from './cine';
 import { readHeader, groupSeries, seriesLabel, dicomToNifti } from './dcm';
+import { LargeVolumeViewer, LARGE_OVERLAY_CMAPS, isGzip, peekNifti, peekNiftiGz, needsLargeMode, decompressNifti, loadVol, STREAM_BYTES } from './large';
 
 declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
 const vscode = acquireVsCodeApi();
@@ -52,60 +53,70 @@ function applyView(v: string) {
   }
 }
 
-viewSel.addEventListener('change', () => applyView(viewSel.value));
+viewSel.addEventListener('change', () => (mode === 'large' ? large?.setView(viewSel.value) : applyView(viewSel.value)));
 addBtn.addEventListener('click', () => vscode.postMessage({ type: 'pickOverlay' }));
 
-// ---------- contrast (main image) ----------
+// ---------- contrast (main image; niivue or large-volume mode) ----------
+
+interface ContrastTarget {
+  get(): [number, number];
+  set(lo: number, hi: number): void;
+  full(): [number, number];
+  robust(): [number, number];
+  isInt: boolean;
+}
 
 const cMin = $<HTMLInputElement>('cMin');
 const cMax = $<HTMLInputElement>('cMax');
 const cMinN = $<HTMLInputElement>('cMinN');
 const cMaxN = $<HTMLInputElement>('cMaxN');
 let baseVol: NVImage | null = null;
+let contrastTarget: ContrastTarget | null = null;
 
 function fmt(v: number) {
   return Math.abs(v) >= 1000 || Number.isInteger(v) ? String(Math.round(v)) : v.toPrecision(4);
 }
 
 function syncContrastUi() {
-  if (!baseVol) return;
-  cMin.value = cMinN.value = fmt(baseVol.cal_min ?? 0);
-  cMax.value = cMaxN.value = fmt(baseVol.cal_max ?? 1);
+  if (!contrastTarget) return;
+  const [lo, hi] = contrastTarget.get();
+  cMin.value = cMinN.value = fmt(lo);
+  cMax.value = cMaxN.value = fmt(hi);
 }
 
 function setContrast(lo: number, hi: number) {
-  if (!baseVol) return;
+  if (!contrastTarget) return;
   if (hi <= lo) hi = lo + Math.max(Number(cMin.step) || 1e-6, 1e-6);
-  baseVol.cal_min = lo;
-  baseVol.cal_max = hi;
-  nv.updateGLVolume();
+  contrastTarget.set(lo, hi);
   syncContrastUi();
 }
 
-function setupContrast(vol: NVImage) {
-  baseVol = vol;
-  const v = vol as any;
-  const gmin: number = v.global_min ?? vol.cal_min;
-  const gmax: number = v.global_max ?? vol.cal_max;
-  const isInt = INT_TYPES.has(vol.hdr?.datatypeCode ?? -1);
-  const step = isInt && gmax - gmin > 50 ? 1 : (gmax - gmin) / 1000 || 1e-6;
+function setupContrast(t: ContrastTarget) {
+  contrastTarget = t;
+  const [gmin, gmax] = t.full();
+  const step = t.isInt && gmax - gmin > 50 ? 1 : (gmax - gmin) / 1000 || 1e-6;
   for (const el of [cMin, cMax, cMinN, cMaxN]) { el.min = String(gmin); el.max = String(gmax); el.step = String(step); }
   syncContrastUi();
   $('contrast').classList.remove('hidden');
+}
+
+function niivueContrast(vol: NVImage): ContrastTarget {
+  const v = vol as any;
+  return {
+    get: () => [vol.cal_min ?? 0, vol.cal_max ?? 1],
+    set: (lo, hi) => { vol.cal_min = lo; vol.cal_max = hi; nv.updateGLVolume(); },
+    full: () => [v.global_min ?? vol.cal_min, v.global_max ?? vol.cal_max],
+    robust: () => [v.robust_min ?? v.global_min, v.robust_max ?? v.global_max],
+    isInt: INT_TYPES.has(vol.hdr?.datatypeCode ?? -1),
+  };
 }
 
 cMin.addEventListener('input', () => setContrast(Number(cMin.value), Math.max(Number(cMax.value), Number(cMin.value))));
 cMax.addEventListener('input', () => setContrast(Math.min(Number(cMin.value), Number(cMax.value)), Number(cMax.value)));
 cMinN.addEventListener('change', () => setContrast(Number(cMinN.value), Number(cMaxN.value)));
 cMaxN.addEventListener('change', () => setContrast(Number(cMinN.value), Number(cMaxN.value)));
-$('cAuto').addEventListener('click', () => {
-  const v = baseVol as any;
-  if (v) setContrast(v.robust_min ?? v.global_min, v.robust_max ?? v.global_max);
-});
-$('cFull').addEventListener('click', () => {
-  const v = baseVol as any;
-  if (v) setContrast(v.global_min, v.global_max);
-});
+$('cAuto').addEventListener('click', () => { if (contrastTarget) setContrast(...contrastTarget.robust()); });
+$('cFull').addEventListener('click', () => { if (contrastTarget) setContrast(...contrastTarget.full()); });
 nv.onIntensityChange = (vol: NVImage) => { if (vol === baseVol) syncContrastUi(); };
 
 // ---------- overlays ----------
@@ -137,7 +148,14 @@ function setOverlayColormap(vol: NVImage, cm: string) {
   nv.updateGLVolume();
 }
 
-function addOverlayRow(vol: NVImage, name: string, initialCmap: string, initialOpacity: number) {
+interface OverlayControls {
+  setShown(visible: boolean, opacity: number): void;
+  setColormap(cm: string): void;
+  remove(): void;
+}
+
+// One control row per overlay; works for both niivue and large-volume mode.
+function addOverlayRow(name: string, cmaps: string[], initialCmap: string, initialOpacity: number, ctl: OverlayControls) {
   const row = document.createElement('div');
   row.className = 'ov';
 
@@ -162,9 +180,7 @@ function addOverlayRow(vol: NVImage, name: string, initialCmap: string, initialO
   const optLabels = document.createElement('option');
   optLabels.value = LABELS; optLabels.textContent = 'labels (distinct colors)';
   cmSel.append(optLabels);
-  const available = new Set(nv.colormaps());
-  for (const cm of OVERLAY_CMAPS) {
-    if (!available.has(cm)) continue;
+  for (const cm of cmaps) {
     const o = document.createElement('option');
     o.value = cm; o.textContent = cm;
     cmSel.append(o);
@@ -174,59 +190,110 @@ function addOverlayRow(vol: NVImage, name: string, initialCmap: string, initialO
   const rm = document.createElement('button');
   rm.textContent = 'remove';
 
-  const applyOpacity = () => {
-    const i = nv.volumes.indexOf(vol);
-    if (i >= 0) nv.setOpacity(i, vis.checked ? parseFloat(op.value) : 0);
-  };
-  vis.addEventListener('change', applyOpacity);
-  op.addEventListener('input', applyOpacity);
-  cmSel.addEventListener('change', () => setOverlayColormap(vol, cmSel.value));
-  rm.addEventListener('click', () => {
-    nv.removeVolume(vol);
-    row.remove();
-  });
+  const applyShown = () => ctl.setShown(vis.checked, parseFloat(op.value));
+  vis.addEventListener('change', applyShown);
+  op.addEventListener('input', applyShown);
+  cmSel.addEventListener('change', () => ctl.setColormap(cmSel.value));
+  rm.addEventListener('click', () => { ctl.remove(); row.remove(); });
 
   row.append(nm, visLabel, opLabel, cmSel, rm);
   overlaysEl.append(row);
 }
 
 async function addOverlay(name: string, buf: ArrayBuffer) {
+  if (mode === 'large' && large) {
+    const lv = large;
+    const vol = await loadVol(buf, (m) => { statusEl.textContent = `${name}: ${m}`; });
+    const h = lv.addOverlay(vol, name);
+    statusEl.textContent = baseStatus;
+    const init = h.initialCmap === 'labels' ? LABELS : h.initialCmap;
+    addOverlayRow(name, LARGE_OVERLAY_CMAPS, init, 0.5, {
+      setShown: (vis, op) => { h.setVisible(vis); h.setOpacity(op); },
+      setColormap: (cm) => h.setColormap(cm === LABELS ? 'labels' : cm),
+      remove: () => h.remove(),
+    });
+    return;
+  }
   const vol = await NVImage.loadFromUrl({ url: buf, name, colormap: 'red', opacity: 0.5 });
   const isInt = INT_TYPES.has(vol.hdr?.datatypeCode ?? -1);
   const max = (vol as any).global_max ?? vol.cal_max ?? 0;
   const cmap = isInt && max <= 65535 ? LABELS : 'red';
   nv.addVolume(vol);
   setOverlayColormap(vol, cmap);
-  addOverlayRow(vol, name, cmap, 0.5);
+  const available = new Set(nv.colormaps());
+  addOverlayRow(name, OVERLAY_CMAPS.filter((c) => available.has(c)), cmap, 0.5, {
+    setShown: (vis, op) => { const i = nv.volumes.indexOf(vol); if (i >= 0) nv.setOpacity(i, vis ? op : 0); },
+    setColormap: (cm) => setOverlayColormap(vol, cm),
+    remove: () => nv.removeVolume(vol),
+  });
 }
 
 // ---------- loading ----------
 
-function setMode(mode: 'volume' | 'cine') {
-  const vol = mode === 'volume';
-  $('volCtl').classList.toggle('hidden', !vol);
-  canvas.classList.toggle('hidden', !vol);
-  $('contrast').classList.toggle('hidden', !vol || !baseVol);
-  overlaysEl.classList.toggle('hidden', !vol);
-  $('cineCtl').classList.toggle('hidden', vol);
-  $('cineAdj').classList.toggle('hidden', vol);
-  $('cine').classList.toggle('hidden', vol);
+type Mode = 'volume' | 'large' | 'cine';
+let mode: Mode = 'volume';
+let large: LargeVolumeViewer | null = null;
+const renderOption = viewSel.querySelector('option[value="render"]') as HTMLOptionElement;
+
+function setMode(m: Mode) {
+  mode = m;
+  const volLike = m !== 'cine';
+  $('volCtl').classList.toggle('hidden', !volLike);
+  canvas.classList.toggle('hidden', m !== 'volume');
+  $('large').classList.toggle('hidden', m !== 'large');
+  $('contrast').classList.toggle('hidden', !volLike || !contrastTarget);
+  overlaysEl.classList.toggle('hidden', !volLike);
+  $('cineCtl').classList.toggle('hidden', volLike);
+  $('cineAdj').classList.toggle('hidden', volLike);
+  $('cine').classList.toggle('hidden', volLike);
+  // No 3D render in large-volume mode.
+  renderOption.disabled = m === 'large';
+  if (m === 'large' && viewSel.value === 'render') viewSel.value = 'multi';
 }
 
 function clearVolumes() {
   while (nv.volumes.length) nv.removeVolume(nv.volumes[0]);
   overlaysEl.innerHTML = '';
   baseVol = null;
+  contrastTarget = null;
+  large?.destroy();
+  large = null;
 }
+
+const isAllocError = (e: any) => e instanceof RangeError || /allocation|out of memory/i.test(String(e?.message ?? e));
 
 // `label` is what the status line shows; `fileName` must carry the right extension for niivue.
 async function openVolume(label: string, fileName: string, buf: ArrayBuffer, readInfo: string) {
   setMode('volume');
   clearVolumes();
   const t0 = performance.now();
-  const mb = (buf.byteLength / 1e6).toFixed(1);
+  let raw = buf, name = fileName;
+  if (/\.nii(\.gz)?$/i.test(fileName)) {
+    const gz = isGzip(buf);
+    // Decide from the header alone, before decompressing anything big.
+    const pk = gz ? await peekNiftiGz(buf) : peekNifti(buf);
+    if (pk && (needsLargeMode(pk) || pk.rawBytes > STREAM_BYTES)) {
+      const reason = `${Math.round(pk.voxels / 1e6)} M voxels, ${(pk.rawBytes / 1e9).toFixed(2)} GB uncompressed`;
+      return openLarge(label, buf, readInfo, reason, t0);
+    }
+    if (gz) {
+      statusEl.textContent = `Decompressing ${label}…`;
+      raw = decompressNifti(buf);
+      name = fileName.replace(/\.gz$/i, '');
+    }
+  }
+  const mb = (raw.byteLength / 1e6).toFixed(1);
   statusEl.textContent = `Decoding ${label} (${mb} MB)…`;
-  await nv.loadFromArrayBuffer(buf, fileName);
+  try {
+    await nv.loadFromArrayBuffer(raw, name);
+  } catch (e) {
+    if (isAllocError(e) && /\.nii$/i.test(name)) {
+      log(`niivue could not allocate memory for ${label}; switching to large-volume mode`);
+      clearVolumes();
+      return openLarge(label, raw, readInfo, 'too large for the 3D viewer', t0);
+    }
+    throw e;
+  }
   applyView(viewSel.value);
   const ms = Math.round(performance.now() - t0);
   const vol = nv.volumes[0];
@@ -234,13 +301,39 @@ async function openVolume(label: string, fileName: string, buf: ArrayBuffer, rea
   baseStatus = `${label} · ${dims} · ${readInfo}, render ${ms} ms`;
   statusEl.textContent = baseStatus;
   addBtn.disabled = false;
-  if (vol) setupContrast(vol);
+  if (vol) { baseVol = vol; setupContrast(niivueContrast(vol)); }
+}
+
+// `buf` may be .nii or .nii.gz; big compressed files are stream-decompressed.
+async function openLarge(label: string, buf: ArrayBuffer, readInfo: string, reason: string, t0: number) {
+  setMode('large');
+  statusEl.textContent = `Opening ${label} in large-volume mode (${reason})…`;
+  large = new LargeVolumeViewer($('large'), (loc) => { if (baseStatus) statusEl.textContent = `${baseStatus} · ${loc}`; });
+  const vol = await loadVol(buf, (m) => { statusEl.textContent = `${label}: ${m}`; });
+  const info = large.load(vol);
+  if (vol.quantized) log(`${label}: ${vol.typeName}, range ${vol.gmin}..${vol.gmax}`);
+  large.setView(viewSel.value);
+  const ms = Math.round(performance.now() - t0);
+  const frames = info.frames > 1 ? ` (first of ${info.frames} frames)` : '';
+  baseStatus = `${label} · ${info.dims.join('×')}${frames} · ${info.typeName} · large-volume mode, full resolution (${reason}) · ${readInfo}, load ${ms} ms`;
+  statusEl.textContent = baseStatus;
+  const lv = large;
+  setupContrast({
+    get: () => lv.range,
+    set: (lo, hi) => lv.setRange(lo, hi),
+    full: () => lv.fullRange,
+    robust: () => lv.robustRange(),
+    isInt: info.isInt,
+  });
+  addBtn.disabled = false;
 }
 
 let player: CinePlayer | null = null;
 
 async function openCine(name: string, buf: ArrayBuffer, readInfo: string) {
   setMode('cine');
+  large?.destroy();
+  large = null;
   baseStatus = '';
   player?.destroy();
   const mb = (buf.byteLength / 1e6).toFixed(1);

@@ -11,11 +11,13 @@ Works on your own computer and on remote servers over Remote-SSH.
 
 - **3D images** (NIfTI, or DICOM CT/MR): axial, coronal, sagittal and 3D views, contrast with an **Auto** button, and label overlays with their own color and opacity
 - **Ultrasound and other DICOM clips**: play, pause and step through frames, adjust brightness and contrast, zoom and pan
+- **Very large volumes** (several GB): open at full resolution as 2D slices
 
 ## Install
 
 In VS Code, open the **Extensions** panel, search for **Volume Viewer (remote-safe)**, and click **Install**.
 If you use Remote-SSH, install it while connected.
+On the extension's page, check **Auto Update** so you always have the latest version.
 
 ## Use
 

@@ -208,7 +208,7 @@ class ViewerProvider implements vscode.CustomReadonlyEditorProvider {
   .hidden { display: none !important; }
   #frame { width: 260px; }
   #canvasWrap { flex: 1 1 auto; position: relative; min-height: 0; overflow: hidden; }
-  #gl, #cine { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #gl, #cine, #large { position: absolute; inset: 0; width: 100%; height: 100%; }
   #cine { cursor: grab; }
   #err { color: #f66; white-space: pre-wrap; padding: 12px; display: none; }
 </style>
@@ -256,7 +256,7 @@ class ViewerProvider implements vscode.CustomReadonlyEditorProvider {
   </div>
   <div id="overlays"></div>
   <div id="err"></div>
-  <div id="canvasWrap"><canvas id="gl"></canvas><canvas id="cine" class="hidden"></canvas></div>
+  <div id="canvasWrap"><canvas id="gl"></canvas><canvas id="cine" class="hidden"></canvas><canvas id="large" class="hidden"></canvas></div>
 </div>
 <script nonce="${nonce}">${this.scriptCache}</script>
 </body>
