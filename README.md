@@ -3,7 +3,7 @@
 View 3D medical images right inside VS Code: no downloading, no switching apps.
 Works on your own computer and on remote servers over Remote-SSH.
 
-![Volume Viewer showing an image with a label overlay](https://raw.githubusercontent.com/AdinaScheinfeld/vscode-volume-viewer/main/docs/screenshot.png)
+<img src="https://raw.githubusercontent.com/AdinaScheinfeld/vscode-volume-viewer/main/docs/screenshot.png" alt="Volume Viewer showing an image with a label overlay" width="600">
 
 ## What you can do
 
