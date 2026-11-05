@@ -5,6 +5,7 @@
 // (exact range, 65536 levels). No 3D render.
 
 import * as nifti from 'nifti-reader-js';
+import { labelRGB } from './colors';
 
 type TypedArray = Uint8Array | Int8Array | Uint16Array | Int16Array | Uint32Array | Int32Array | Float32Array | Float64Array;
 type Ctor = { new (n: number): TypedArray; new (b: ArrayBuffer, o: number, n: number): TypedArray; BYTES_PER_ELEMENT: number };
@@ -319,28 +320,24 @@ function rampColor(name: string, t: number): [number, number, number] {
   }
 }
 
-function labelColor(i: number): [number, number, number] {
-  const h = ((i * 137.508) % 360) / 60;
-  const s = 0.85, v = 1.0;
-  const c = v * s, x = c * (1 - Math.abs((h % 2) - 1)), m = v - c;
-  const [r, g, b] = h < 1 ? [c, x, 0] : h < 2 ? [x, c, 0] : h < 3 ? [0, c, x] : h < 4 ? [0, x, c] : h < 5 ? [x, 0, c] : [c, 0, x];
-  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
-}
-
 class Overlay {
   visible = true;
   opacity = 0.5;
   cmap: string; // 'labels' or a ramp name
   lut: Uint8Array = new Uint8Array(0); // label colors (r,g,b per label)
-  constructor(public vol: Vol, public name: string) {
-    this.cmap = vol.isInt && vol.gmax <= 65535 ? 'labels' : 'red';
+  constructor(public vol: Vol, public name: string, public slot: number) {
+    // Labels get a per-overlay color; continuous maps rotate through red, green, blue.
+    this.cmap = vol.isInt && vol.gmax <= 65535 ? 'labels' : LARGE_OVERLAY_CMAPS[slot % 3];
     this.buildLut();
   }
   buildLut() {
     if (this.cmap !== 'labels') return;
-    const n = Math.max(1, Math.round(this.vol.gmax)) + 1;
-    this.lut = new Uint8Array(n * 3);
-    for (let i = 1; i < n; i++) { const [r, g, b] = labelColor(i); this.lut[3 * i] = r; this.lut[3 * i + 1] = g; this.lut[3 * i + 2] = b; }
+    const max = Math.max(1, Math.round(this.vol.gmax));
+    this.lut = new Uint8Array((max + 1) * 3);
+    for (let i = 1; i <= max; i++) {
+      const [r, g, b] = labelRGB(i, this.slot, max);
+      this.lut[3 * i] = r; this.lut[3 * i + 1] = g; this.lut[3 * i + 2] = b;
+    }
   }
 }
 
@@ -425,13 +422,13 @@ export class LargeVolumeViewer {
     this.requestDraw();
   }
 
-  addOverlay(vol: Vol, name: string): OverlayHandle {
+  addOverlay(vol: Vol, name: string, slot: number): OverlayHandle {
 
     const b = this.base;
     if (vol.D.some((d, i) => d !== b.D[i])) {
       throw new Error(`In large-volume mode an overlay must have the same grid as the image (${b.vdims.join('×')}); ${name} is ${vol.vdims.join('×')}.`);
     }
-    const ov = new Overlay(vol, name);
+    const ov = new Overlay(vol, name, slot);
     this.overlays.push(ov);
     this.markAll();
     this.emitLocation();

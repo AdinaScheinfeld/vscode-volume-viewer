@@ -23,7 +23,7 @@ On the extension's page, check **Auto Update** so you always have the latest ver
 - **Open a file:** right-click a `.nii`, `.nii.gz` or `.dcm` file → **Open With… → Volume Viewer (remote-safe)**.
   Clicking one slice of a DICOM series opens the whole series.
 - **Open a DICOM folder:** right-click the folder → **Open DICOM folder in Volume Viewer**.
-- **Add an overlay:** click **Add overlay…**.
+- **Add overlays:** click **Add overlay…**. You can add several segmentations to one image, and each gets its own color.
 
 **Tip:** to open files with a double-click, choose **Open With… → Configure default editor…** and pick **Volume Viewer (remote-safe)**.
 

@@ -4,6 +4,7 @@
 
 import { Niivue, NVImage, DRAG_MODE, MULTIPLANAR_TYPE } from '@niivue/niivue';
 import { CinePlayer, isDicom } from './cine';
+import { labelRGB, SlotPool } from './colors';
 import { readHeader, groupSeries, seriesLabel, dicomToNifti } from './dcm';
 import { LargeVolumeViewer, LARGE_OVERLAY_CMAPS, isGzip, peekNifti, peekNiftiGz, needsLargeMode, decompressNifti, loadVol, STREAM_BYTES } from './large';
 
@@ -121,18 +122,18 @@ nv.onIntensityChange = (vol: NVImage) => { if (vol === baseVol) syncContrastUi()
 
 // ---------- overlays ----------
 
-// Distinct colors per integer label (golden-angle hue spacing), label 0 transparent.
-function labelColormap(maxLabel: number) {
+// Each overlay gets its own color slot, so two segmentations never share a color.
+const slots = new SlotPool();
+const overlaySlot = new Map<NVImage, number>();
+
+// Label colormap for one overlay, label 0 transparent.
+function labelColormap(maxLabel: number, slot: number) {
   const n = Math.max(1, Math.min(Math.round(maxLabel), 65535));
   const R: number[] = [], G: number[] = [], B: number[] = [], A: number[] = [], I: number[] = [];
   for (let i = 0; i <= n; i++) {
     if (i === 0) { R.push(0); G.push(0); B.push(0); A.push(0); I.push(0); continue; }
-    const h = ((i * 137.508) % 360) / 60;
-    const s = 0.85, v = 1.0;
-    const c = v * s, x = c * (1 - Math.abs((h % 2) - 1)), m = v - c;
-    const [r, g, b] = h < 1 ? [c, x, 0] : h < 2 ? [x, c, 0] : h < 3 ? [0, c, x] : h < 4 ? [0, x, c] : h < 5 ? [x, 0, c] : [c, 0, x];
-    R.push(Math.round((r + m) * 255)); G.push(Math.round((g + m) * 255)); B.push(Math.round((b + m) * 255));
-    A.push(255); I.push(i);
+    const [r, g, b] = labelRGB(i, slot, n);
+    R.push(r); G.push(g); B.push(b); A.push(255); I.push(i);
   }
   return { R, G, B, A, I };
 }
@@ -140,7 +141,7 @@ function labelColormap(maxLabel: number) {
 function setOverlayColormap(vol: NVImage, cm: string) {
   if (cm === LABELS) {
     const max = (vol as any).global_max ?? vol.cal_max ?? 1;
-    vol.setColormapLabel(labelColormap(max));
+    vol.setColormapLabel(labelColormap(max, overlaySlot.get(vol) ?? 0));
   } else {
     (vol as any).colormapLabel = null;
     vol.colormap = cm;
@@ -204,27 +205,33 @@ async function addOverlay(name: string, buf: ArrayBuffer) {
   if (mode === 'large' && large) {
     const lv = large;
     const vol = await loadVol(buf, (m) => { statusEl.textContent = `${name}: ${m}`; });
-    const h = lv.addOverlay(vol, name);
+    const slot = slots.take();
+    let h;
+    try { h = lv.addOverlay(vol, name, slot); } catch (e) { slots.release(slot); throw e; }
     statusEl.textContent = baseStatus;
     const init = h.initialCmap === 'labels' ? LABELS : h.initialCmap;
     addOverlayRow(name, LARGE_OVERLAY_CMAPS, init, 0.5, {
       setShown: (vis, op) => { h.setVisible(vis); h.setOpacity(op); },
       setColormap: (cm) => h.setColormap(cm === LABELS ? 'labels' : cm),
-      remove: () => h.remove(),
+      remove: () => { h.remove(); slots.release(slot); },
     });
     return;
   }
   const vol = await NVImage.loadFromUrl({ url: buf, name, colormap: 'red', opacity: 0.5 });
+  const slot = slots.take();
+  overlaySlot.set(vol, slot);
+  const available = new Set(nv.colormaps());
+  const cmaps = OVERLAY_CMAPS.filter((c) => available.has(c));
   const isInt = INT_TYPES.has(vol.hdr?.datatypeCode ?? -1);
   const max = (vol as any).global_max ?? vol.cal_max ?? 0;
-  const cmap = isInt && max <= 65535 ? LABELS : 'red';
+  // Labels get a per-overlay color; continuous maps rotate through red, green, blue, …
+  const cmap = isInt && max <= 65535 ? LABELS : cmaps[slot % Math.min(3, cmaps.length)] ?? 'red';
   nv.addVolume(vol);
   setOverlayColormap(vol, cmap);
-  const available = new Set(nv.colormaps());
-  addOverlayRow(name, OVERLAY_CMAPS.filter((c) => available.has(c)), cmap, 0.5, {
+  addOverlayRow(name, cmaps, cmap, 0.5, {
     setShown: (vis, op) => { const i = nv.volumes.indexOf(vol); if (i >= 0) nv.setOpacity(i, vis ? op : 0); },
     setColormap: (cm) => setOverlayColormap(vol, cm),
-    remove: () => nv.removeVolume(vol),
+    remove: () => { nv.removeVolume(vol); slots.release(slot); overlaySlot.delete(vol); },
   });
 }
 
@@ -254,6 +261,8 @@ function setMode(m: Mode) {
 function clearVolumes() {
   while (nv.volumes.length) nv.removeVolume(nv.volumes[0]);
   overlaysEl.innerHTML = '';
+  slots.clear();
+  overlaySlot.clear();
   baseVol = null;
   contrastTarget = null;
   large?.destroy();
