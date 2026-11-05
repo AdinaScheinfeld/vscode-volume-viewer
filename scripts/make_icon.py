@@ -1,4 +1,4 @@
-"""Make the 128x128 Marketplace icon from the 3D render in docs/screenshot.png.
+"""Make the 128x128 Marketplace icon from the 3D render in docs/icon_source.png.
 
 Steps: remove the red crosshair, crop tightly around the render, brighten,
 and put it on a dark rounded square.

@@ -11,7 +11,7 @@ Works on your own computer and on remote servers over Remote-SSH.
 - See axial, coronal, sagittal and 3D views at once, or pick just one
 - Click anywhere to move the crosshair and see the voxel value
 - Add one or more overlays, like segmentation labels or predictions
-- Adjust each overlay's colour and opacity, hide it, or remove it
+- Adjust each overlay's color and opacity, hide it, or remove it
 
 ## Install
 
