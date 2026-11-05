@@ -4,7 +4,7 @@ View medical images right inside VS Code: no downloading, no switching apps.
 Works on your own computer and on remote servers over Remote-SSH.
 
 <p>
-<img src="https://raw.githubusercontent.com/AdinaScheinfeld/vscode-volume-viewer/main/docs/screenshot.png" alt="3D microscopy image with a label overlay" width="49%"> <img src="https://raw.githubusercontent.com/AdinaScheinfeld/vscode-volume-viewer/main/docs/screenshot_ultrasound.png" alt="Ultrasound clip in the player" width="49%">
+<img src="https://raw.githubusercontent.com/AdinaScheinfeld/vscode-volume-viewer/main/docs/screenshot_microscopy.png" alt="3D microscopy image with a label overlay" width="49%"> <img src="https://raw.githubusercontent.com/AdinaScheinfeld/vscode-volume-viewer/main/docs/screenshot_ultrasound_clip.png" alt="Ultrasound clip in the player" width="49%">
 </p>
 
 ## What you can do
