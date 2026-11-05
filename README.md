@@ -1,49 +1,39 @@
 # Volume Viewer for VS Code
 
-View 3D medical images right inside VS Code: no downloading, no switching apps.
+View medical images right inside VS Code: no downloading, no switching apps.
 Works on your own computer and on remote servers over Remote-SSH.
 
-<img src="https://raw.githubusercontent.com/AdinaScheinfeld/vscode-volume-viewer/main/docs/screenshot.png" alt="Volume Viewer showing an image with a label overlay" width="600">
+<img src="https://raw.githubusercontent.com/AdinaScheinfeld/vscode-volume-viewer/main/docs/screenshot.png" alt="3D microscopy image with a label overlay" height="380">
+<img src="https://raw.githubusercontent.com/AdinaScheinfeld/vscode-volume-viewer/main/docs/screenshot_ultrasound.png" alt="Ultrasound clip in the player" height="380">
 
 ## What you can do
 
-- Open `.nii` and `.nii.gz` files in a VS Code tab
-- See axial, coronal, sagittal and 3D views at once, or pick just one
-- Click anywhere to move the crosshair and see the voxel value
-- Add one or more overlays, like segmentation labels or predictions
-- Adjust each overlay's color and opacity, hide it, or remove it
+- **3D images** (NIfTI, or DICOM CT/MR): axial, coronal, sagittal and 3D views, contrast with an **Auto** button, and label overlays with their own color and opacity
+- **Ultrasound and other DICOM clips**: play, pause and step through frames, adjust brightness and contrast, zoom and pan
 
 ## Install
 
 In VS Code, open the **Extensions** panel, search for **Volume Viewer (remote-safe)**, and click **Install**.
-
-If you use Remote-SSH, install it while connected so it runs on the server.
+If you use Remote-SSH, install it while connected.
 
 ## Use
 
-1. Right-click a `.nii` or `.nii.gz` file and choose **Open With… → Volume Viewer (remote-safe)**.
-2. Use the **View** menu to switch between views.
-3. Click **Add overlay…** to put a label or other image on top.
+- **Open a file:** right-click a `.nii`, `.nii.gz` or `.dcm` file → **Open With… → Volume Viewer (remote-safe)**.
+  Clicking one slice of a DICOM series opens the whole series.
+- **Open a DICOM folder:** right-click the folder → **Open DICOM folder in Volume Viewer**.
+- **Add an overlay:** click **Add overlay…**.
 
-**Tip:** to open images with a plain double-click, choose
-**Open With… → Configure default editor…** and pick **Volume Viewer (remote-safe)**.
+**Tip:** to open files with a double-click, choose **Open With… → Configure default editor…** and pick **Volume Viewer (remote-safe)**.
 
 ## Build it yourself
 
-You need [Node.js](https://nodejs.org). Then run:
-
-```bash
-npm install
-npm run build
-npm run package
-```
-
+With [Node.js](https://nodejs.org) installed, run `npm install`, `npm run build` and `npm run package`.
 This creates `vscode-volume-viewer.vsix`.
 
 ## Credits
 
-Images are drawn with [NiiVue](https://github.com/niivue/niivue).
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for its license and others.
+Images are drawn with [NiiVue](https://github.com/niivue/niivue); DICOM conversion uses [dcm2niix](https://github.com/rordenlab/dcm2niix).
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for all licenses.
 
 ## License
 
