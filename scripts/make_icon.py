@@ -37,18 +37,17 @@ square.paste(crop.crop((max(box[0], 0), max(box[1], 0), min(box[2], crop.width),
 crop = square
 
 # Shrink, then brighten and sharpen so it reads at small size.
-small = crop.resize((112, 112), Image.LANCZOS)
+small = crop.resize((128, 128), Image.LANCZOS)
 small = ImageEnhance.Brightness(small).enhance(1.45)
 small = ImageEnhance.Contrast(small).enhance(1.25)
 small = ImageEnhance.Color(small).enhance(1.3)
 small = small.filter(ImageFilter.UnsharpMask(radius=1.2, percent=80, threshold=2))
 
-# Dark rounded square background with transparent corners.
+# The render fills the whole icon (its own black background, no separate border),
+# with rounded transparent corners.
 icon = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
-bg = Image.new("RGBA", (128, 128), (18, 20, 24, 255))
 round_mask = Image.new("L", (128, 128), 0)
 ImageDraw.Draw(round_mask).rounded_rectangle((0, 0, 127, 127), radius=22, fill=255)
-icon.paste(bg, (0, 0), round_mask)
-icon.paste(small, (8, 8))
+icon.paste(small.convert("RGBA"), (0, 0), round_mask)
 icon.save(dst)
 print(f"wrote {dst} from {src} box={box}, red pixels removed: {int(red.sum())}")
