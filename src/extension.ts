@@ -239,6 +239,27 @@ class ViewerProvider implements vscode.CustomReadonlyEditorProvider {
     </span>
     <span id="status">Loading…</span>
   </div>
+  <div id="sliceRow" class="row hidden">
+    <span>Slice</span>
+    <select id="sliceAxis" title="Which direction the slider moves through">
+      <option value="2" selected>axial</option>
+      <option value="1">coronal</option>
+      <option value="0">sagittal</option>
+    </select>
+    <input type="range" id="slice" min="0" max="0" value="0" style="width:260px">
+    <span id="sliceLbl" class="lbl"></span>
+    <span id="frameGrp" class="grp hidden">
+      <span>Frame</span>
+      <input type="range" id="frame4d" min="0" max="0" value="0" style="width:180px">
+      <span id="frame4dLbl" class="lbl"></span>
+    </span>
+    <label>Display
+      <select id="convention">
+        <option value="radio" selected>Radiological (like ITK-SNAP)</option>
+        <option value="neuro">Neurological</option>
+      </select>
+    </label>
+  </div>
   <div id="contrast" class="row hidden">
     <span>Contrast</span>
     <label>min <input type="range" id="cMin"> <input type="number" id="cMinN"></label>

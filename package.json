@@ -2,7 +2,7 @@
   "name": "vscode-volume-viewer",
   "displayName": "Volume Viewer (remote-safe)",
   "description": "View medical images in a VS Code tab: NIfTI volumes with label overlays and DICOM clips such as ultrasound. Works over Remote-SSH.",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "publisher": "AdiSchein",
   "author": "Adina Scheinfeld",
   "license": "MIT",

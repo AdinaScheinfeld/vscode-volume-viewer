@@ -40,6 +40,8 @@ const nv = new Niivue({
   // Always a 2x2 grid (axial, coronal, sagittal, 3D), never a tall column.
   multiplanarLayout: MULTIPLANAR_TYPE.GRID,
   dragMode: DRAG_MODE.contrast,
+  // Like ITK-SNAP: patient right on screen left in axial/coronal views.
+  isRadiologicalConvention: true,
 });
 
 let baseStatus = '';
@@ -54,7 +56,88 @@ function applyView(v: string) {
   }
 }
 
-viewSel.addEventListener('change', () => (mode === 'large' ? large?.setView(viewSel.value) : applyView(viewSel.value)));
+viewSel.addEventListener('change', () => {
+  if (mode === 'large') large?.setView(viewSel.value);
+  else applyView(viewSel.value);
+  updateSliceUi();
+});
+
+// ---------- slice / frame slider and display convention ----------
+
+const sliceRow = $<HTMLDivElement>('sliceRow');
+const sliceAxisSel = $<HTMLSelectElement>('sliceAxis');
+const sliceIn = $<HTMLInputElement>('slice');
+const sliceLbl = $<HTMLSpanElement>('sliceLbl');
+const frameGrp = $<HTMLSpanElement>('frameGrp');
+const frameIn = $<HTMLInputElement>('frame4d');
+const frameLbl = $<HTMLSpanElement>('frame4dLbl');
+const conventionSel = $<HTMLSelectElement>('convention');
+let radiological = true; // like ITK-SNAP: patient right on screen left
+
+// Axis the slider moves along (0 = sagittal, 1 = coronal, 2 = axial). A single view fixes it.
+function sliceAxis(): number {
+  const v = viewSel.value;
+  const fixed = v === 'axial' ? 2 : v === 'coronal' ? 1 : v === 'sagittal' ? 0 : -1;
+  sliceAxisSel.classList.toggle('hidden', fixed >= 0);
+  return fixed >= 0 ? fixed : Number(sliceAxisSel.value);
+}
+
+function nvDims(): number[] | null {
+  const d = (baseVol as any)?.dimsRAS as number[] | undefined;
+  return d ? [d[1], d[2], d[3]] : null;
+}
+
+function sliceCount(axis: number): number {
+  if (mode === 'large' && large) return large.sliceCount(axis);
+  return nvDims()?.[axis] ?? 1;
+}
+
+function getSlice(axis: number): number {
+  if (mode === 'large' && large) return large.getSlice(axis);
+  const d = nvDims();
+  if (!d) return 0;
+  return Math.min(d[axis] - 1, Math.max(0, Math.floor(nv.scene.crosshairPos[axis] * d[axis])));
+}
+
+function setSlice(axis: number, k: number) {
+  if (mode === 'large' && large) return large.setSlice(axis, k);
+  const d = nvDims();
+  if (!d) return;
+  nv.scene.crosshairPos[axis] = (k + 0.5) / d[axis];
+  nv.drawScene();
+  (nv as any).createOnLocationChange?.();
+}
+
+function updateSliceUi() {
+  if (mode === 'cine' || (!baseVol && !large)) { sliceRow.classList.add('hidden'); return; }
+  sliceRow.classList.remove('hidden');
+  const ax = sliceAxis();
+  const n = sliceCount(ax), k = getSlice(ax);
+  sliceIn.max = String(Math.max(0, n - 1));
+  sliceIn.value = String(k);
+  sliceLbl.textContent = `${k + 1} / ${n}`;
+  const nf: number = mode === 'volume' ? ((baseVol as any)?.nFrame4D ?? 1) : 1;
+  frameGrp.classList.toggle('hidden', nf < 2);
+  if (nf > 1) {
+    const f: number = (baseVol as any)?.frame4D ?? 0;
+    frameIn.max = String(nf - 1);
+    frameIn.value = String(f);
+    frameLbl.textContent = `${f + 1} / ${nf}`;
+  }
+}
+
+sliceIn.addEventListener('input', () => { setSlice(sliceAxis(), Number(sliceIn.value)); updateSliceUi(); });
+sliceAxisSel.addEventListener('change', updateSliceUi);
+frameIn.addEventListener('input', () => {
+  if (!baseVol) return;
+  nv.setFrame4D(baseVol.id, Number(frameIn.value));
+  updateSliceUi();
+});
+conventionSel.addEventListener('change', () => {
+  radiological = conventionSel.value === 'radio';
+  nv.setRadiologicalConvention(radiological);
+  large?.setRadiological(radiological);
+});
 addBtn.addEventListener('click', () => vscode.postMessage({ type: 'pickOverlay' }));
 
 // ---------- contrast (main image; niivue or large-volume mode) ----------
@@ -249,6 +332,7 @@ function setMode(m: Mode) {
   canvas.classList.toggle('hidden', m !== 'volume');
   $('large').classList.toggle('hidden', m !== 'large');
   $('contrast').classList.toggle('hidden', !volLike || !contrastTarget);
+  $('sliceRow').classList.toggle('hidden', !volLike || (!baseVol && !large));
   overlaysEl.classList.toggle('hidden', !volLike);
   $('cineCtl').classList.toggle('hidden', volLike);
   $('cineAdj').classList.toggle('hidden', volLike);
@@ -311,13 +395,15 @@ async function openVolume(label: string, fileName: string, buf: ArrayBuffer, rea
   statusEl.textContent = baseStatus;
   addBtn.disabled = false;
   if (vol) { baseVol = vol; setupContrast(niivueContrast(vol)); }
+  updateSliceUi();
 }
 
 // `buf` may be .nii or .nii.gz; big compressed files are stream-decompressed.
 async function openLarge(label: string, buf: ArrayBuffer, readInfo: string, reason: string, t0: number) {
   setMode('large');
   statusEl.textContent = `Opening ${label} in large-volume mode (${reason})…`;
-  large = new LargeVolumeViewer($('large'), (loc) => { if (baseStatus) statusEl.textContent = `${baseStatus} · ${loc}`; });
+  large = new LargeVolumeViewer($('large'), (loc) => { if (baseStatus) statusEl.textContent = `${baseStatus} · ${loc}`; updateSliceUi(); });
+  large.setRadiological(radiological);
   const vol = await loadVol(buf, (m) => { statusEl.textContent = `${label}: ${m}`; });
   const info = large.load(vol);
   if (vol.quantized) log(`${label}: ${vol.typeName}, range ${vol.gmin}..${vol.gmax}`);
@@ -335,6 +421,7 @@ async function openLarge(label: string, buf: ArrayBuffer, readInfo: string, reas
     isInt: info.isInt,
   });
   addBtn.disabled = false;
+  updateSliceUi();
 }
 
 let player: CinePlayer | null = null;
@@ -506,6 +593,7 @@ window.addEventListener('message', async (event) => {
 
 nv.onLocationChange = (data: any) => {
   if (baseStatus && data?.string) statusEl.textContent = `${baseStatus} · ${data.string}`;
+  updateSliceUi();
 };
 
 // Accept whatever shape the bytes arrive in.

@@ -422,6 +422,19 @@ export class LargeVolumeViewer {
     this.requestDraw();
   }
 
+  // Radiological (default, like ITK-SNAP): patient right on screen left in axial and coronal views.
+  private radiological = true;
+  private isMirrored(axis: number) { return this.radiological && axis === 0; }
+  setRadiological(on: boolean) {
+    this.radiological = on;
+    this.markAll();
+  }
+
+  // Slice API for the slider (axis 0 = sagittal/R, 1 = coronal/A, 2 = axial/S).
+  sliceCount(axis: number) { return this.base ? this.base.D[axis] : 1; }
+  getSlice(axis: number) { return this.pos[axis]; }
+  setSlice(axis: number, k: number) { this.setPos(axis, k); }
+
   addOverlay(vol: Vol, name: string, slot: number): OverlayHandle {
 
     const b = this.base;
@@ -469,7 +482,10 @@ export class LargeVolumeViewer {
     }
     const out = p.img!.data;
     const fixed = this.pos[ax.f];
-    const su = b.step[ax.u], sv = b.step[ax.v];
+    // Radiological convention: patient right on screen left, i.e. the R axis runs right-to-left.
+    const mirror = this.isMirrored(ax.u);
+    const su = mirror ? -b.step[ax.u] : b.step[ax.u], sv = b.step[ax.v];
+    const uStart = mirror ? (Du - 1) * b.step[ax.u] : 0;
     const base0 = b.origin + fixed * b.step[ax.f];
     const ch = b.chunks;
     const d = ch[0];
@@ -489,7 +505,7 @@ export class LargeVolumeViewer {
       }
     }
     for (let y = 0; y < Dv; y++) {
-      let idx = base0 + (Dv - 1 - y) * sv;
+      let idx = base0 + uStart + (Dv - 1 - y) * sv;
       let o = y * Du * 4;
       for (let x = 0; x < Du; x++, idx += su, o += 4) {
         let g: number;
@@ -503,12 +519,13 @@ export class LargeVolumeViewer {
     for (const ov of this.overlays) {
       if (!ov.visible || ov.opacity <= 0) continue;
       const och = ov.vol.chunks, ob0 = ov.vol.origin + fixed * ov.vol.step[ax.f];
-      const ou = ov.vol.step[ax.u], ovs = ov.vol.step[ax.v];
+      const ou = mirror ? -ov.vol.step[ax.u] : ov.vol.step[ax.u], ovs = ov.vol.step[ax.v];
+      const ouStart = mirror ? (Du - 1) * ov.vol.step[ax.u] : 0;
       const a = ov.opacity;
       const labels = ov.cmap === 'labels';
       const omin = ov.vol.gmin, orange = (ov.vol.gmax - ov.vol.gmin) || 1;
       for (let y = 0; y < Dv; y++) {
-        let idx = ob0 + (Dv - 1 - y) * ovs;
+        let idx = ob0 + ouStart + (Dv - 1 - y) * ovs;
         let o = y * Du * 4;
         for (let x = 0; x < Du; x++, idx += ou, o += 4) {
           const raw = och[idx >>> 24][idx & 16777215];
@@ -580,7 +597,8 @@ export class LargeVolumeViewer {
       ctx.imageSmoothingEnabled = w < b.D[ax.u];
       ctx.drawImage(p.canvas!, x, y, w, h);
       // Crosshair.
-      const cx = x + ((this.pos[ax.u] + 0.5) / b.D[ax.u]) * w;
+      const cu = this.isMirrored(ax.u) ? b.D[ax.u] - 1 - this.pos[ax.u] : this.pos[ax.u];
+      const cx = x + ((cu + 0.5) / b.D[ax.u]) * w;
       const cy = y + ((b.D[ax.v] - 1 - this.pos[ax.v] + 0.5) / b.D[ax.v]) * h;
       ctx.strokeStyle = 'rgba(255,40,40,0.9)';
       ctx.lineWidth = Math.max(1, dpr);
@@ -590,7 +608,7 @@ export class LargeVolumeViewer {
       ctx.stroke();
       // Orientation letters.
       ctx.fillStyle = 'rgba(200,200,200,0.8)';
-      ctx.fillText(ax.left, p.rect.x + 4 * dpr, p.rect.y + p.rect.h / 2);
+      ctx.fillText(this.isMirrored(ax.u) ? 'R' : ax.left, p.rect.x + 4 * dpr, p.rect.y + p.rect.h / 2);
       ctx.fillText(ax.top, p.rect.x + p.rect.w / 2, p.rect.y + 16 * dpr);
       ctx.restore();
     }
@@ -679,7 +697,7 @@ export class LargeVolumeViewer {
       const u = ((x - d.p.draw.x) / d.p.draw.w) * b.D[ax.u];
       const v = ((y - d.p.draw.y) / d.p.draw.h) * b.D[ax.v];
       if (u < 0 || v < 0 || u >= b.D[ax.u] || v >= b.D[ax.v]) return;
-      this.setPos(ax.u, Math.floor(u));
+      this.setPos(ax.u, this.isMirrored(ax.u) ? b.D[ax.u] - 1 - Math.floor(u) : Math.floor(u));
       this.setPos(ax.v, b.D[ax.v] - 1 - Math.floor(v));
     }, { signal });
     c.addEventListener('dblclick', (e) => {
