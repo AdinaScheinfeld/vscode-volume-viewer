@@ -3,7 +3,7 @@
 #SBATCH --partition=minilab-cpu
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
-#SBATCH --time=12:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --output=/athena/paetzollab/scratch/ads4015/vscode-volume-viewer/logs/build_%j.out
 
 set -euo pipefail

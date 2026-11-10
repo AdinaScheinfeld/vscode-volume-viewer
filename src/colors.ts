@@ -1,34 +1,46 @@
 // Label colors shared by the niivue view and large-volume mode.
-// Each overlay gets a "slot" so different segmentations get different colors.
 
-// Binary masks (only label 1): one solid color per overlay.
-const PALETTE: [number, number, number][] = [
-  [0, 230, 60],    // green
-  [255, 50, 50],   // red
-  [50, 130, 255],  // blue
-  [255, 220, 0],   // yellow
-  [0, 230, 230],   // cyan
-  [255, 0, 255],   // magenta
-  [255, 140, 0],   // orange
-  [160, 90, 255],  // purple
+import { PALETTE_DATA } from './palettes';
+
+// Colormap values for label overlays: `solid:N` (every label one color) or `palette:N`.
+const SOLID_PREFIX = 'solid:';
+const PALETTE_PREFIX = 'palette:';
+
+const SOLID: { name: string; rgb: [number, number, number] }[] = [
+  { name: 'Green', rgb: [0, 230, 60] },
+  { name: 'Red', rgb: [255, 50, 50] },
+  { name: 'Blue', rgb: [50, 130, 255] },
+  { name: 'Yellow', rgb: [255, 220, 0] },
+  { name: 'Cyan', rgb: [0, 230, 230] },
+  { name: 'Magenta', rgb: [255, 0, 255] },
+  { name: 'Orange', rgb: [255, 140, 0] },
+  { name: 'Purple', rgb: [160, 90, 255] },
 ];
 
-function hsv(hDeg: number): [number, number, number] {
-  const h = (((hDeg % 360) + 360) % 360) / 60;
-  const s = 0.85, v = 1.0;
-  const c = v * s, x = c * (1 - Math.abs((h % 2) - 1)), m = v - c;
-  const [r, g, b] = h < 1 ? [c, x, 0] : h < 2 ? [x, c, 0] : h < 3 ? [0, c, x] : h < 4 ? [0, x, c] : h < 5 ? [x, 0, c] : [c, 0, x];
-  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+export const SOLID_OPTIONS = SOLID.map((c, i) => ({ value: `${SOLID_PREFIX}${i}`, label: c.name }));
+export const PALETTE_OPTIONS = PALETTE_DATA.map((p, i) => ({ value: `${PALETTE_PREFIX}${i}`, label: p.name }));
+
+export const isLabelScheme = (cm: string) => cm.startsWith(SOLID_PREFIX) || cm.startsWith(PALETTE_PREFIX);
+
+const DECODED: Uint8Array[] = PALETTE_DATA.map((p) => {
+  const n = p.hex.length / 2;
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) out[i] = parseInt(p.hex.substr(i * 2, 2), 16);
+  return out;
+});
+
+export const solidName = (index: number) => `${SOLID_PREFIX}${index % SOLID.length}`;
+export const paletteName = (index: number) => `${PALETTE_PREFIX}${index % DECODED.length}`;
+
+// Color for `label` (>= 1). Label numbers past the end of a palette wrap around.
+export function labelRGB(label: number, scheme: string): [number, number, number] {
+  if (scheme.startsWith(SOLID_PREFIX)) return SOLID[Number(scheme.slice(SOLID_PREFIX.length)) % SOLID.length].rgb;
+  const p = DECODED[Number(scheme.slice(PALETTE_PREFIX.length)) % DECODED.length];
+  const i = ((label - 1) % (p.length / 3)) * 3;
+  return [p[i], p[i + 1], p[i + 2]];
 }
 
-// Color for `label` (>= 1) in the overlay using color slot `slot`.
-export function labelRGB(label: number, slot: number, maxLabel: number): [number, number, number] {
-  if (maxLabel <= 1) return PALETTE[slot % PALETTE.length];
-  // Multi-label: golden-angle hues, shifted per overlay so two files don't share a color set.
-  return hsv(label * 137.508 + slot * 67);
-}
-
-// Lowest free slot, so a removed overlay's color is reused first.
+// Lowest free slot, so a removed overlay's color or palette is reused first.
 export class SlotPool {
   private used = new Set<number>();
   take(): number {

@@ -1,5 +1,5 @@
 import * as esbuild from 'esbuild';
-import { readdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
+import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
 
 // Extension host bundle (Node, runs on the remote machine).
@@ -16,7 +16,7 @@ await esbuild.build({
 });
 
 // dcm2niix worker: bundle the package's worker with the WebAssembly embedded, so the
-// webview can start it from a blob: URL and nothing is ever fetched by URL.
+// webview can start it from a blob: URL.
 const dcmDist = resolve('node_modules/@niivue/dcm2niix/dist');
 const embedWasm = {
   name: 'dcm2niix-embed-wasm',
@@ -47,7 +47,10 @@ const worker = await esbuild.build({
   plugins: [embedWasm],
   logLevel: 'info',
 });
+// Kept out of the panel HTML: only sent to the tab when a 3D DICOM needs converting.
 const workerSrc = worker.outputFiles[0].text;
+mkdirSync('dist', { recursive: true });
+writeFileSync('dist/dcm2niix-worker.js', workerSrc);
 console.log(`dcm2niix worker: ${(workerSrc.length / 1e6).toFixed(2)} MB`);
 
 // Webview bundle (browser, inlined into the panel HTML).
@@ -62,7 +65,6 @@ const web = await esbuild.build({
   sourcemap: false,
   logLevel: 'info',
   loader: { '.wasm': 'binary' },
-  define: { __DCM2NIIX_WORKER__: JSON.stringify(workerSrc) },
   metafile: true,
 });
 

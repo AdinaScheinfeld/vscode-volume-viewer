@@ -4,9 +4,10 @@
 
 import { Niivue, NVImage, DRAG_MODE, MULTIPLANAR_TYPE } from '@niivue/niivue';
 import { CinePlayer, isDicom } from './cine';
-import { labelRGB, SlotPool } from './colors';
+import { SOLID_OPTIONS, PALETTE_OPTIONS, isLabelScheme, labelRGB, solidName, paletteName, SlotPool } from './colors';
 import { readHeader, groupSeries, seriesLabel, dicomToNifti } from './dcm';
 import { LargeVolumeViewer, LARGE_OVERLAY_CMAPS, isGzip, peekNifti, peekNiftiGz, needsLargeMode, decompressNifti, loadVol, STREAM_BYTES } from './large';
+import { installTooltips } from './tooltips';
 
 declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
 const vscode = acquireVsCodeApi();
@@ -18,8 +19,8 @@ const viewSel = $<HTMLSelectElement>('view');
 const addBtn = $<HTMLButtonElement>('addOverlay');
 const overlaysEl = $<HTMLDivElement>('overlays');
 const canvas = $<HTMLCanvasElement>('gl');
+const tooltips = installTooltips($('tip'), $('help'));
 
-const LABELS = '__labels__';
 const OVERLAY_CMAPS = ['red', 'green', 'blue', 'warm', 'cool', 'hot', 'winter', 'plasma', 'viridis', 'gray'];
 // Integer NIfTI datatypes: uint8, int16, int32, int8, uint16, uint32.
 const INT_TYPES = new Set([2, 4, 8, 256, 512, 768]);
@@ -44,7 +45,19 @@ const nv = new Niivue({
   isRadiologicalConvention: true,
 });
 
+// Left-drag moves the crosshair, Shift- or middle-drag pans, right-drag fits contrast to a region.
+nv.setMouseEventConfig({
+  leftButton: { primary: DRAG_MODE.crosshair, withShift: DRAG_MODE.pan },
+  rightButton: DRAG_MODE.contrast,
+  centerButton: DRAG_MODE.pan,
+});
+
 let baseStatus = '';
+let attached: Promise<void> = Promise.resolve(); // niivue's GL setup
+
+// Keep the full status text available on hover when it doesn't fit.
+new MutationObserver(() => { statusEl.title = statusEl.textContent ?? ''; })
+  .observe(statusEl, { childList: true, characterData: true, subtree: true });
 
 function applyView(v: string) {
   switch (v) {
@@ -62,6 +75,73 @@ viewSel.addEventListener('change', () => {
   updateSliceUi();
 });
 
+// ---------- zoom ----------
+
+interface ZoomTarget { get(): number; set(z: number): void; reset(): void }
+
+const niivueZoom: ZoomTarget = {
+  get: () => (viewSel.value === 'render' ? nv.scene.volScaleMultiplier : nv.scene.pan2Dxyzmm[3]),
+  set: (z) => {
+    const zoom = Math.min(32, Math.max(0.25, z));
+    if (viewSel.value === 'render') { nv.scene.volScaleMultiplier = zoom; nv.drawScene(); return; }
+    // Same math as niivue's own zoom: keeps the crosshair where it is on screen.
+    const pan = nv.scene.pan2Dxyzmm, mm = nv.frac2mm(nv.scene.crosshairPos), dz = pan[3] - zoom;
+    nv.setPan2Dxyzmm([pan[0] + dz * mm[0], pan[1] + dz * mm[1], pan[2] + dz * mm[2], zoom] as any);
+  },
+  reset: () => { nv.scene.volScaleMultiplier = 1; nv.setPan2Dxyzmm([0, 0, 0, 1] as any); },
+};
+
+function zoomTarget(): ZoomTarget | null {
+  if (mode === 'cine') {
+    const p = player;
+    return p && { get: () => p.getZoom(), set: (z) => p.setZoom(z), reset: () => p.resetZoom() };
+  }
+  if (mode === 'large') {
+    const l = large;
+    return l && { get: () => l.getZoom(), set: (z) => l.setZoom(z), reset: () => l.resetZoom() };
+  }
+  return baseVol ? niivueZoom : null;
+}
+
+function updateZoomUi() {
+  const t = zoomTarget();
+  $('zoomLbl').textContent = `${Math.round((t ? t.get() : 1) * 100)}%`;
+}
+
+function zoomBy(factor: number) {
+  const t = zoomTarget();
+  if (!t) return;
+  t.set(t.get() * factor);
+  updateZoomUi();
+}
+
+$('zoomIn').addEventListener('click', () => zoomBy(1.25));
+$('zoomOut').addEventListener('click', () => zoomBy(0.8));
+$('zoomFit').addEventListener('click', () => { zoomTarget()?.reset(); updateZoomUi(); });
+
+// In the 2x2 view, point the slider at whichever panel is being scrolled or clicked.
+function followPanel(e: MouseEvent) {
+  if (viewSel.value !== 'multi' || mode !== 'volume') return;
+  const r = canvas.getBoundingClientRect();
+  const dpr = nv.uiData.dpr ?? window.devicePixelRatio ?? 1;
+  const tile = nv.screenSlices[nv.tileIndex((e.clientX - r.left) * dpr, (e.clientY - r.top) * dpr)];
+  if (tile && tile.axCorSag <= 2) {
+    sliceAxisSel.value = String(2 - tile.axCorSag); // niivue: 0 axial, 1 coronal, 2 sagittal
+    updateSliceUi();
+  }
+}
+canvas.addEventListener('mousedown', followPanel, { capture: true });
+
+// Ctrl/Cmd + scroll or trackpad pinch zooms; plain scroll still changes slice.
+canvas.addEventListener('wheel', (e) => {
+  followPanel(e);
+  if (!e.ctrlKey && !e.metaKey) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  const delta = Math.max(-50, Math.min(50, e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY));
+  zoomBy(Math.exp(-delta * 0.01));
+}, { capture: true, passive: false });
+
 // ---------- slice / frame slider and display convention ----------
 
 const sliceRow = $<HTMLDivElement>('sliceRow');
@@ -71,7 +151,6 @@ const sliceLbl = $<HTMLSpanElement>('sliceLbl');
 const frameGrp = $<HTMLSpanElement>('frameGrp');
 const frameIn = $<HTMLInputElement>('frame4d');
 const frameLbl = $<HTMLSpanElement>('frame4dLbl');
-const conventionSel = $<HTMLSelectElement>('convention');
 let radiological = true; // like ITK-SNAP: patient right on screen left
 
 // Axis the slider moves along (0 = sagittal, 1 = coronal, 2 = axial). A single view fixes it.
@@ -109,6 +188,7 @@ function setSlice(axis: number, k: number) {
 }
 
 function updateSliceUi() {
+  updateZoomUi();
   if (mode === 'cine' || (!baseVol && !large)) { sliceRow.classList.add('hidden'); return; }
   sliceRow.classList.remove('hidden');
   const ax = sliceAxis();
@@ -133,10 +213,13 @@ frameIn.addEventListener('input', () => {
   nv.setFrame4D(baseVol.id, Number(frameIn.value));
   updateSliceUi();
 });
-conventionSel.addEventListener('change', () => {
-  radiological = conventionSel.value === 'radio';
-  nv.setRadiologicalConvention(radiological);
-  large?.setRadiological(radiological);
+document.querySelectorAll<HTMLInputElement>('input[name="convention"]').forEach((r) => {
+  r.addEventListener('change', () => {
+    if (!r.checked) return;
+    radiological = r.value === 'radio';
+    nv.setRadiologicalConvention(radiological);
+    large?.setRadiological(radiological);
+  });
 });
 addBtn.addEventListener('click', () => vscode.postMessage({ type: 'pickOverlay' }));
 
@@ -205,26 +288,38 @@ nv.onIntensityChange = (vol: NVImage) => { if (vol === baseVol) syncContrastUi()
 
 // ---------- overlays ----------
 
-// Each overlay gets its own color slot, so two segmentations never share a color.
+// Binary masks and continuous maps take a color slot; multi-label files take a palette.
 const slots = new SlotPool();
-const overlaySlot = new Map<NVImage, number>();
+const paletteSlots = new SlotPool();
+
+interface ColorAssignment { cmap: string; isLabel: boolean; release(): void }
+
+function assignColors(isLabelMap: boolean, max: number, continuous: string[]): ColorAssignment {
+  if (isLabelMap && max > 1) {
+    const p = paletteSlots.take();
+    return { cmap: paletteName(p), isLabel: true, release: () => paletteSlots.release(p) };
+  }
+  const s = slots.take();
+  const cmap = isLabelMap ? solidName(s) : continuous[s % Math.min(3, continuous.length)] ?? 'red';
+  return { cmap, isLabel: isLabelMap, release: () => slots.release(s) };
+}
 
 // Label colormap for one overlay, label 0 transparent.
-function labelColormap(maxLabel: number, slot: number) {
+function labelColormap(maxLabel: number, scheme: string) {
   const n = Math.max(1, Math.min(Math.round(maxLabel), 65535));
   const R: number[] = [], G: number[] = [], B: number[] = [], A: number[] = [], I: number[] = [];
   for (let i = 0; i <= n; i++) {
     if (i === 0) { R.push(0); G.push(0); B.push(0); A.push(0); I.push(0); continue; }
-    const [r, g, b] = labelRGB(i, slot, n);
+    const [r, g, b] = labelRGB(i, scheme);
     R.push(r); G.push(g); B.push(b); A.push(255); I.push(i);
   }
   return { R, G, B, A, I };
 }
 
 function setOverlayColormap(vol: NVImage, cm: string) {
-  if (cm === LABELS) {
+  if (isLabelScheme(cm)) {
     const max = (vol as any).global_max ?? vol.cal_max ?? 1;
-    vol.setColormapLabel(labelColormap(max, overlaySlot.get(vol) ?? 0));
+    vol.setColormapLabel(labelColormap(max, cm));
   } else {
     (vol as any).colormapLabel = null;
     vol.colormap = cm;
@@ -239,7 +334,7 @@ interface OverlayControls {
 }
 
 // One control row per overlay; works for both niivue and large-volume mode.
-function addOverlayRow(name: string, cmaps: string[], initialCmap: string, initialOpacity: number, ctl: OverlayControls) {
+function addOverlayRow(name: string, cmaps: string[], colors: ColorAssignment, initialOpacity: number, ctl: OverlayControls) {
   const row = document.createElement('div');
   row.className = 'ov';
 
@@ -261,15 +356,22 @@ function addOverlayRow(name: string, cmaps: string[], initialCmap: string, initi
   opLabel.append('opacity ', op);
 
   const cmSel = document.createElement('select');
-  const optLabels = document.createElement('option');
-  optLabels.value = LABELS; optLabels.textContent = 'labels (distinct colors)';
-  cmSel.append(optLabels);
-  for (const cm of cmaps) {
-    const o = document.createElement('option');
-    o.value = cm; o.textContent = cm;
-    cmSel.append(o);
+  const addGroup = (label: string, items: { value: string; label: string }[]) => {
+    const g = document.createElement('optgroup');
+    g.label = label;
+    for (const it of items) {
+      const o = document.createElement('option');
+      o.value = it.value; o.textContent = it.label;
+      g.append(o);
+    }
+    cmSel.append(g);
+  };
+  if (colors.isLabel) {
+    addGroup('Single label (one color)', SOLID_OPTIONS);
+    addGroup('Multiple labels (150-color palettes)', PALETTE_OPTIONS);
   }
-  cmSel.value = initialCmap;
+  addGroup('Continuous (intensity maps)', cmaps.map((c) => ({ value: c, label: c[0].toUpperCase() + c.slice(1) })));
+  cmSel.value = colors.cmap;
 
   const rm = document.createElement('button');
   rm.textContent = 'remove';
@@ -288,33 +390,37 @@ async function addOverlay(name: string, buf: ArrayBuffer) {
   if (mode === 'large' && large) {
     const lv = large;
     const vol = await loadVol(buf, (m) => { statusEl.textContent = `${name}: ${m}`; });
-    const slot = slots.take();
+    const colors = assignColors(vol.isInt && vol.gmax <= 65535, vol.gmax, LARGE_OVERLAY_CMAPS);
     let h;
-    try { h = lv.addOverlay(vol, name, slot); } catch (e) { slots.release(slot); throw e; }
+    try { h = lv.addOverlay(vol, name, colors.cmap); } catch (e) { colors.release(); throw e; }
     statusEl.textContent = baseStatus;
-    const init = h.initialCmap === 'labels' ? LABELS : h.initialCmap;
-    addOverlayRow(name, LARGE_OVERLAY_CMAPS, init, 0.5, {
+    addOverlayRow(name, LARGE_OVERLAY_CMAPS, colors, 0.5, {
       setShown: (vis, op) => { h.setVisible(vis); h.setOpacity(op); },
-      setColormap: (cm) => h.setColormap(cm === LABELS ? 'labels' : cm),
-      remove: () => { h.remove(); slots.release(slot); },
+      setColormap: (cm) => h.setColormap(cm),
+      remove: () => { h.remove(); colors.release(); },
     });
     return;
   }
-  const vol = await NVImage.loadFromUrl({ url: buf, name, colormap: 'red', opacity: 0.5 });
-  const slot = slots.take();
-  overlaySlot.set(vol, slot);
+  let raw = buf, rawName = name;
+  if (isGzip(buf) && /\.nii\.gz$/i.test(name)) {
+    statusEl.textContent = `Decompressing ${name}…`;
+    const pk = await peekNiftiGz(buf);
+    raw = await decompressNifti(buf, pk?.rawBytes);
+    rawName = name.replace(/\.gz$/i, '');
+  }
+  const vol = await NVImage.loadFromUrl({ url: raw, name: rawName, colormap: 'red', opacity: 0.5 });
+  statusEl.textContent = baseStatus;
   const available = new Set(nv.colormaps());
   const cmaps = OVERLAY_CMAPS.filter((c) => available.has(c));
   const isInt = INT_TYPES.has(vol.hdr?.datatypeCode ?? -1);
   const max = (vol as any).global_max ?? vol.cal_max ?? 0;
-  // Labels get a per-overlay color; continuous maps rotate through red, green, blue, …
-  const cmap = isInt && max <= 65535 ? LABELS : cmaps[slot % Math.min(3, cmaps.length)] ?? 'red';
+  const colors = assignColors(isInt && max <= 65535, max, cmaps);
   nv.addVolume(vol);
-  setOverlayColormap(vol, cmap);
-  addOverlayRow(name, cmaps, cmap, 0.5, {
+  setOverlayColormap(vol, colors.cmap);
+  addOverlayRow(name, cmaps, colors, 0.5, {
     setShown: (vis, op) => { const i = nv.volumes.indexOf(vol); if (i >= 0) nv.setOpacity(i, vis ? op : 0); },
     setColormap: (cm) => setOverlayColormap(vol, cm),
-    remove: () => { nv.removeVolume(vol); slots.release(slot); overlaySlot.delete(vol); },
+    remove: () => { nv.removeVolume(vol); colors.release(); },
   });
 }
 
@@ -323,12 +429,36 @@ async function addOverlay(name: string, buf: ArrayBuffer) {
 type Mode = 'volume' | 'large' | 'cine';
 let mode: Mode = 'volume';
 let large: LargeVolumeViewer | null = null;
+
+const HELP: Record<Mode, string> = {
+  volume: 'Click: move crosshair\nScroll: change slice\n⌘/Ctrl + scroll or pinch: zoom\nShift + drag: pan\nRight-drag: fit contrast to a region',
+  large: 'Click: move crosshair\nScroll: change slice (Shift: ×10)\n⌘/Ctrl + scroll or pinch: zoom\nDrag: pan\nDouble-click: reset view',
+  cine: 'Scroll: zoom\nDrag: pan\nDouble-click: fit\nSpace: play / pause\n←/→: step one frame',
+};
+
+// The DICOM converter is fetched from the extension only when a 3D DICOM needs it.
+let workerSrcPromise: Promise<string> | null = null;
+let workerWaiter: ((src: string) => void) | null = null;
+function getWorkerSrc(): Promise<string> {
+  if (!workerSrcPromise) {
+    workerSrcPromise = new Promise((resolve) => {
+      workerWaiter = resolve;
+      vscode.postMessage({ type: 'getWorker' });
+    });
+  }
+  return workerSrcPromise;
+}
 const renderOption = viewSel.querySelector('option[value="render"]') as HTMLOptionElement;
 
 function setMode(m: Mode) {
   mode = m;
   const volLike = m !== 'cine';
   $('volCtl').classList.toggle('hidden', !volLike);
+  $('orientCtl').classList.toggle('hidden', !volLike);
+  addBtn.classList.toggle('hidden', !volLike);
+  $('zoomCtl').classList.remove('hidden');
+  $('help').title = HELP[m];
+  tooltips.refresh();
   canvas.classList.toggle('hidden', m !== 'volume');
   $('large').classList.toggle('hidden', m !== 'large');
   $('contrast').classList.toggle('hidden', !volLike || !contrastTarget);
@@ -346,7 +476,7 @@ function clearVolumes() {
   while (nv.volumes.length) nv.removeVolume(nv.volumes[0]);
   overlaysEl.innerHTML = '';
   slots.clear();
-  overlaySlot.clear();
+  paletteSlots.clear();
   baseVol = null;
   contrastTarget = null;
   large?.destroy();
@@ -371,13 +501,16 @@ async function openVolume(label: string, fileName: string, buf: ArrayBuffer, rea
     }
     if (gz) {
       statusEl.textContent = `Decompressing ${label}…`;
-      raw = decompressNifti(buf);
+      raw = await decompressNifti(buf, pk?.rawBytes);
       name = fileName.replace(/\.gz$/i, '');
     }
   }
   const mb = (raw.byteLength / 1e6).toFixed(1);
   statusEl.textContent = `Decoding ${label} (${mb} MB)…`;
   try {
+    await attached;
+    nv.scene.pan2Dxyzmm = [0, 0, 0, 1] as any; // each file starts unzoomed
+    nv.scene.volScaleMultiplier = 1;
     await nv.loadFromArrayBuffer(raw, name);
   } catch (e) {
     if (isAllocError(e) && /\.nii$/i.test(name)) {
@@ -404,6 +537,10 @@ async function openLarge(label: string, buf: ArrayBuffer, readInfo: string, reas
   statusEl.textContent = `Opening ${label} in large-volume mode (${reason})…`;
   large = new LargeVolumeViewer($('large'), (loc) => { if (baseStatus) statusEl.textContent = `${baseStatus} · ${loc}`; updateSliceUi(); });
   large.setRadiological(radiological);
+  large.onZoomChange = updateZoomUi;
+  large.onPanelActive = (axis) => {
+    if (viewSel.value === 'multi') { sliceAxisSel.value = String(axis); updateSliceUi(); }
+  };
   const vol = await loadVol(buf, (m) => { statusEl.textContent = `${label}: ${m}`; });
   const info = large.load(vol);
   if (vol.quantized) log(`${label}: ${vol.typeName}, range ${vol.gmin}..${vol.gmax}`);
@@ -440,7 +577,9 @@ async function openCine(name: string, buf: ArrayBuffer, readInfo: string) {
     bri: $('bri'), briLbl: $('briLbl'), con: $('con'), conLbl: $('conLbl'),
     auto: $('cineAuto'), reset: $('cineReset'),
   });
+  player.onZoomChange = updateZoomUi;
   const info = await player.open(buf);
+  updateZoomUi();
   statusEl.textContent =
     `${name} · ${info.cols}×${info.rows} · ${info.nFrames} frame${info.nFrames > 1 ? 's' : ''} · ${info.codec} · ${mb} MB · ${readInfo}, first frame ${info.firstFrameMs} ms`;
   log(`cine ${name}: ${info.cols}x${info.rows}x${info.nFrames} ${info.codec} @${info.fps}fps, first frame ${info.firstFrameMs} ms`);
@@ -477,18 +616,18 @@ async function open3D(label: string, files: DicomFile[], readMs: number) {
   setMode('volume');
   statusEl.textContent = `Converting ${files.length} DICOM file${files.length > 1 ? 's' : ''} to a 3D volume…`;
   const t0 = performance.now();
-  const nii = await dicomToNifti(files, log);
+  const nii = await dicomToNifti(files, log, await getWorkerSrc());
   const convMs = Math.round(performance.now() - t0);
   const bytes = files.reduce((a, f) => a + f.buf.byteLength, 0);
   const extra = nii.outputs.length > 1 ? ` · showing ${nii.name} (of ${nii.outputs.length} outputs)` : '';
   await openVolume(`${label}${extra}`, nii.name, nii.buf,
-    `${files.length} file${files.length > 1 ? 's' : ''} · ${mbOf(bytes)} MB · read ${readMs} ms, convert ${convMs} ms`);
+    `${files.length} file${files.length > 1 ? 's' : ''} · ${mbOf(bytes)} MB · fetch ${readMs} ms, convert ${convMs} ms`);
 }
 
 // A single .dcm file was opened.
 async function openDicomFile(name: string, buf: ArrayBuffer, readMs: number) {
   const h = readHeader(name, buf);
-  if (!h || h.is2D) return openCine(name, buf, `read ${readMs} ms`);
+  if (!h || h.is2D) return openCine(name, buf, `fetch ${readMs} ms`);
   if (h.nFrames > 1) return open3D(`${name} · ${h.modality}`, [{ name, buf }], readMs);
 
   // One slice of a series: gather the other files in the same folder from the same series.
@@ -521,7 +660,7 @@ async function openDicomFolder(folderName: string, entries: FileEntry[], listMs:
   for (const s of series) {
     if (s.is2D) {
       for (const f of s.files) {
-        choices.push({ label: `${seriesLabel(s)} · ${f.name}`, open: () => openCine(f.name, f.buf, `read ${readMs} ms`) });
+        choices.push({ label: `${seriesLabel(s)} · ${f.name}`, open: () => openCine(f.name, f.buf, `fetch ${readMs} ms`) });
       }
     } else {
       choices.push({ label: seriesLabel(s), open: () => open3D(`${s.desc} · ${s.modality}`, s.files, readMs) });
@@ -552,6 +691,11 @@ window.addEventListener('message', async (event) => {
     showError(msg.message);
     return;
   }
+  if (msg?.type === 'workerSrc') {
+    workerWaiter?.(msg.src);
+    workerWaiter = null;
+    return;
+  }
   if (msg?.type === 'siblings') {
     siblingsWaiter?.(msg.files ?? []);
     siblingsWaiter = null;
@@ -572,7 +716,7 @@ window.addEventListener('message', async (event) => {
     try {
       const t0 = performance.now();
       await addOverlay(msg.name, toArrayBuffer(msg.data));
-      log(`overlay ${msg.name}: read ${msg.readMs} ms, load ${Math.round(performance.now() - t0)} ms`);
+      log(`overlay ${msg.name}: fetch ${msg.readMs} ms, load ${Math.round(performance.now() - t0)} ms`);
     } catch (e: any) {
       showError(`Failed to load overlay ${msg.name}: ${e?.message ?? e}\n${e?.stack ?? ''}`);
     }
@@ -583,8 +727,9 @@ window.addEventListener('message', async (event) => {
       await openDicomFolder(msg.name, msg.files ?? [], msg.listMs ?? 0);
     } else if (msg?.type === 'load') {
       const buf = toArrayBuffer(msg.data);
-      if (isDicom(msg.name, buf)) await openDicomFile(msg.name, buf, msg.readMs);
-      else await openVolume(msg.name, msg.name, buf, `${mbOf(buf.byteLength)} MB · read ${msg.readMs} ms`);
+      const fetchMs = Math.round(performance.now() - tReady);
+      if (isDicom(msg.name, buf)) await openDicomFile(msg.name, buf, fetchMs);
+      else await openVolume(msg.name, msg.name, buf, `${mbOf(buf.byteLength)} MB · fetch ${fetchMs} ms`);
     }
   } catch (e: any) {
     showError(`Failed to load ${msg.name}: ${e?.message ?? e}\n${e?.stack ?? ''}`);
@@ -611,19 +756,22 @@ function toArrayBuffer(d: any): ArrayBuffer {
   throw new Error(`unexpected data: ${Object.prototype.toString.call(d)}`);
 }
 
-(async () => {
+// Set up niivue and ask for the file at the same time; opening a volume waits for `attached`.
+attached = (async () => {
   try {
     await nv.attachToCanvas(canvas);
-    // niivue only listens for window resizes; also resize when the panel area changes
-    // (e.g. the toolbar wraps onto more lines or the editor is split).
-    let pending = false;
-    new ResizeObserver(() => {
-      if (pending) return;
-      pending = true;
-      requestAnimationFrame(() => { pending = false; nv.resizeListener(); });
-    }).observe($("canvasWrap"));
-    vscode.postMessage({ type: 'ready' });
   } catch (e: any) {
-    showError(`WebGL init failed: ${e?.message ?? e}`);
+    throw new Error(`WebGL init failed: ${e?.message ?? e}`);
   }
+  // niivue only listens for window resizes; also resize when the panel area changes
+  // (e.g. the toolbar wraps onto more lines or the editor is split).
+  let pending = false;
+  new ResizeObserver(() => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; nv.resizeListener(); });
+  }).observe($('canvasWrap'));
 })();
+attached.catch((e) => log(String(e?.message ?? e)));
+const tReady = performance.now();
+vscode.postMessage({ type: 'ready' });

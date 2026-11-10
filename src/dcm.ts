@@ -69,9 +69,8 @@ export function seriesLabel(s: Series): string {
   return `#${s.number} ${s.desc} · ${s.modality} · ${s.files.length} file${s.files.length > 1 ? 's' : ''}`;
 }
 
-function makeWorker(): Worker {
-  const url = URL.createObjectURL(new Blob([__DCM2NIIX_WORKER__], { type: 'text/javascript' }));
-  return new Worker(url);
+function makeWorker(src: string): Worker {
+  return new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
 }
 
 // Prefer dcm2niix's corrected outputs (equalized slice spacing, gantry-tilt corrected) when present.
@@ -86,9 +85,10 @@ function pickImage(names: string[]): number {
 export async function dicomToNifti(
   files: { name: string; buf: ArrayBuffer }[],
   log: (s: string) => void,
+  workerSrc: string,
 ): Promise<{ name: string; buf: ArrayBuffer; outputs: string[] }> {
   const input = files.map((f) => new File([f.buf], f.name));
-  const res = await convert(input, { args: ['-z', 'n', '-b', 'n'], createWorker: makeWorker, timeoutMs: 300000 });
+  const res = await convert(input, { args: ['-z', 'n', '-b', 'n'], createWorker: () => makeWorker(workerSrc), timeoutMs: 300000 });
   const images = res.series.map((s) => s.image);
   const names = images.map((f) => f.name);
   log(`dcm2niix exit ${res.exitCode}, outputs: ${names.join(', ') || '(none)'}`);

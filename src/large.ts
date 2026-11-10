@@ -5,7 +5,7 @@
 // (exact range, 65536 levels). No 3D render.
 
 import * as nifti from 'nifti-reader-js';
-import { labelRGB } from './colors';
+import { labelRGB, isLabelScheme } from './colors';
 
 type TypedArray = Uint8Array | Int8Array | Uint16Array | Int16Array | Uint32Array | Int32Array | Float32Array | Float64Array;
 type Ctor = { new (n: number): TypedArray; new (b: ArrayBuffer, o: number, n: number): TypedArray; BYTES_PER_ELEMENT: number };
@@ -323,26 +323,23 @@ function rampColor(name: string, t: number): [number, number, number] {
 class Overlay {
   visible = true;
   opacity = 0.5;
-  cmap: string; // 'labels' or a ramp name
   lut: Uint8Array = new Uint8Array(0); // label colors (r,g,b per label)
-  constructor(public vol: Vol, public name: string, public slot: number) {
-    // Labels get a per-overlay color; continuous maps rotate through red, green, blue.
-    this.cmap = vol.isInt && vol.gmax <= 65535 ? 'labels' : LARGE_OVERLAY_CMAPS[slot % 3];
+  // cmap: a label scheme (solid or palette) or a ramp name.
+  constructor(public vol: Vol, public name: string, public cmap: string) {
     this.buildLut();
   }
   buildLut() {
-    if (this.cmap !== 'labels') return;
+    if (!isLabelScheme(this.cmap)) return;
     const max = Math.max(1, Math.round(this.vol.gmax));
     this.lut = new Uint8Array((max + 1) * 3);
     for (let i = 1; i <= max; i++) {
-      const [r, g, b] = labelRGB(i, this.slot, max);
+      const [r, g, b] = labelRGB(i, this.cmap);
       this.lut[3 * i] = r; this.lut[3 * i + 1] = g; this.lut[3 * i + 2] = b;
     }
   }
 }
 
 export interface OverlayHandle {
-  initialCmap: string;
   setVisible(on: boolean): void;
   setOpacity(op: number): void;
   setColormap(cm: string): void;
@@ -430,23 +427,54 @@ export class LargeVolumeViewer {
     this.markAll();
   }
 
+  // ---- zoom (toolbar buttons act on every visible panel, keeping the crosshair in place) ----
+  onZoomChange: () => void = () => {};
+  // Called with the axis of the panel being scrolled or clicked, so the slider can follow it.
+  onPanelActive: (axis: number) => void = () => {};
+  private visibleKinds(): PanelKind[] {
+    return this.view === 'multi' ? ['coronal', 'sagittal', 'axial'] : [this.view];
+  }
+  getZoom() { return this.panels[this.visibleKinds()[0]].zoom; }
+  setZoom(z: number) {
+    if (!this.base) return;
+    const zoom = Math.min(64, Math.max(0.25, z));
+    this.layout(this.canvas.width, this.canvas.height);
+    const anchors = this.visibleKinds().map((k) => {
+      const p = this.panels[k], ax = PANEL_AXES[k], b = this.base;
+      const cu = this.isMirrored(ax.u) ? b.D[ax.u] - 1 - this.pos[ax.u] : this.pos[ax.u];
+      const fx = (cu + 0.5) / b.D[ax.u], fy = (b.D[ax.v] - 1 - this.pos[ax.v] + 0.5) / b.D[ax.v];
+      const sx = p.draw.x + fx * p.draw.w, sy = p.draw.y + fy * p.draw.h;
+      p.zoom = zoom;
+      return { p, fx, fy, sx, sy };
+    });
+    this.layout(this.canvas.width, this.canvas.height);
+    for (const a of anchors) {
+      a.p.panX += a.sx - (a.p.draw.x + a.fx * a.p.draw.w);
+      a.p.panY += a.sy - (a.p.draw.y + a.fy * a.p.draw.h);
+    }
+    this.requestDraw();
+  }
+  resetZoom() {
+    for (const p of Object.values(this.panels)) { p.zoom = 1; p.panX = 0; p.panY = 0; }
+    this.requestDraw();
+  }
+
   // Slice API for the slider (axis 0 = sagittal/R, 1 = coronal/A, 2 = axial/S).
   sliceCount(axis: number) { return this.base ? this.base.D[axis] : 1; }
   getSlice(axis: number) { return this.pos[axis]; }
   setSlice(axis: number, k: number) { this.setPos(axis, k); }
 
-  addOverlay(vol: Vol, name: string, slot: number): OverlayHandle {
+  addOverlay(vol: Vol, name: string, cmap: string): OverlayHandle {
 
     const b = this.base;
     if (vol.D.some((d, i) => d !== b.D[i])) {
       throw new Error(`In large-volume mode an overlay must have the same grid as the image (${b.vdims.join('×')}); ${name} is ${vol.vdims.join('×')}.`);
     }
-    const ov = new Overlay(vol, name, slot);
+    const ov = new Overlay(vol, name, cmap);
     this.overlays.push(ov);
     this.markAll();
     this.emitLocation();
     return {
-      initialCmap: ov.cmap,
       setVisible: (on) => { ov.visible = on; this.markAll(); },
       setOpacity: (op) => { ov.opacity = op; this.markAll(); },
       setColormap: (cm) => { ov.cmap = cm; ov.buildLut(); this.markAll(); },
@@ -522,7 +550,7 @@ export class LargeVolumeViewer {
       const ou = mirror ? -ov.vol.step[ax.u] : ov.vol.step[ax.u], ovs = ov.vol.step[ax.v];
       const ouStart = mirror ? (Du - 1) * ov.vol.step[ax.u] : 0;
       const a = ov.opacity;
-      const labels = ov.cmap === 'labels';
+      const labels = isLabelScheme(ov.cmap);
       const omin = ov.vol.gmin, orange = (ov.vol.gmax - ov.vol.gmin) || 1;
       for (let y = 0; y < Dv; y++) {
         let idx = ob0 + ouStart + (Dv - 1 - y) * ovs;
@@ -697,13 +725,14 @@ export class LargeVolumeViewer {
       const u = ((x - d.p.draw.x) / d.p.draw.w) * b.D[ax.u];
       const v = ((y - d.p.draw.y) / d.p.draw.h) * b.D[ax.v];
       if (u < 0 || v < 0 || u >= b.D[ax.u] || v >= b.D[ax.v]) return;
+      this.onPanelActive(ax.f);
       this.setPos(ax.u, this.isMirrored(ax.u) ? b.D[ax.u] - 1 - Math.floor(u) : Math.floor(u));
       this.setPos(ax.v, b.D[ax.v] - 1 - Math.floor(v));
     }, { signal });
     c.addEventListener('dblclick', (e) => {
       const [x, y] = local(e);
       const p = this.panelAt(x, y);
-      if (p) { p.zoom = 1; p.panX = 0; p.panY = 0; this.requestDraw(); }
+      if (p) { p.zoom = 1; p.panX = 0; p.panY = 0; this.requestDraw(); this.onZoomChange(); }
     }, { signal });
     c.addEventListener('wheel', (e) => {
       if (!this.base) return;
@@ -721,6 +750,7 @@ export class LargeVolumeViewer {
         p.panX += x - (p.draw.x + fu * p.draw.w);
         p.panY += y - (p.draw.y + fv * p.draw.h);
         this.requestDraw();
+        this.onZoomChange();
         return;
       }
       wheelAcc += delta;
@@ -728,12 +758,16 @@ export class LargeVolumeViewer {
       if (!steps) return;
       wheelAcc -= steps * 50;
       const ax = PANEL_AXES[p.kind];
+      this.onPanelActive(ax.f);
       this.setPos(ax.f, this.pos[ax.f] - steps * (e.shiftKey ? 10 : 1));
     }, { passive: false, signal });
   }
 }
 
-// Decompress a .nii.gz in one allocation (size known from the gzip trailer).
-export function decompressNifti(buf: ArrayBuffer): ArrayBuffer {
+// Decompress a .nii.gz. The built-in decompressor is faster and keeps the tab responsive for
+// ordinary files; the JS one wins on huge, highly compressible volumes (single allocation).
+const NATIVE_GUNZIP_BYTES = 256e6;
+export async function decompressNifti(buf: ArrayBuffer, rawBytes?: number): Promise<ArrayBuffer> {
+  if (rawBytes !== undefined && rawBytes < NATIVE_GUNZIP_BYTES) return nifti.decompressAsync(buf);
   return nifti.decompress(buf) as ArrayBuffer;
 }

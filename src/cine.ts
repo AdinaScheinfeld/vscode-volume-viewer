@@ -370,6 +370,7 @@ export class CinePlayer {
       this.panX = mx - u * s2 - (W - this.cols * s2) / 2;
       this.panY = my - v * s2 - (H - this.rows * s2) / 2;
       this.redraw();
+      this.onZoomChange();
     }, { passive: false, signal });
     let drag: { x: number; y: number } | null = null;
     c.addEventListener('mousedown', (e) => { if (e.button === 0) drag = { x: e.clientX, y: e.clientY }; }, { signal });
@@ -381,13 +382,23 @@ export class CinePlayer {
       drag = { x: e.clientX, y: e.clientY };
       this.redraw();
     }, { signal });
-    c.addEventListener('dblclick', () => { this.zoom = 1; this.panX = 0; this.panY = 0; this.redraw(); }, { signal });
+    c.addEventListener('dblclick', () => { this.resetZoom(); this.onZoomChange(); }, { signal });
     this.resizeObs = new ResizeObserver(() => this.redraw());
     this.resizeObs.observe(c);
   }
 
   private abort = new AbortController();
   private resizeObs: ResizeObserver | null = null;
+
+  onZoomChange: () => void = () => {};
+  getZoom() { return this.zoom; }
+  setZoom(z: number) {
+    const zoom = Math.min(40, Math.max(0.2, z));
+    const r = zoom / this.zoom;
+    this.zoom = zoom; this.panX *= r; this.panY *= r;
+    this.redraw();
+  }
+  resetZoom() { this.zoom = 1; this.panX = 0; this.panY = 0; this.redraw(); }
 
   // Stop playback, remove listeners and free decoded frames (used when switching series).
   destroy() {
